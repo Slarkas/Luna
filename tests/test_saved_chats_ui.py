@@ -228,6 +228,194 @@ class TestSavedChatsUI(unittest.TestCase):
         self.assertEqual(gui.history_button.text(), "History: OFF")
         self.assertFalse(gui._history_recording)
 
+    def test_delete_button_exists_in_saved_chats_section(self):
+        db = self.get_db()
+        only = db.create_conversation("Only Chat")
+
+        gui = self.build_gui()
+
+        self.assertTrue(hasattr(gui, "saved_chats_delete"))
+        self.assertEqual(gui.saved_chats_delete.text(), "Delete")
+
+        gui.saved_chats_delete.clicked.emit()
+
+        self.assertEqual(gui.saved_chats_list.currentRow(), -1)
+        self.assertEqual(
+            [record["id"] for record in db.get_all_conversations()], [only]
+        )
+
+    def test_delete_removes_only_the_selected_saved_chat(self):
+        db = self.get_db()
+        older = db.create_conversation("Older Chat")
+        db.add_message(older, "user", "Older chat turn")
+        newer = db.create_conversation("Newer Chat")
+        db.add_message(newer, "assistant", "Newer chat turn")
+
+        gui = self.build_gui()
+        gui.saved_chats_list.setCurrentRow(0)
+        self.assertEqual(gui._saved_chat_records[0]["id"], newer)
+
+        with patch.object(gui, "_confirm_deletion", return_value=True):
+            gui._delete_saved_chat()
+
+        remaining = db.get_all_conversations()
+        self.assertEqual([record["id"] for record in remaining], [older])
+        self.assertEqual(
+            [record["id"] for record in gui._saved_chat_records], [older]
+        )
+        self.assertEqual(gui.saved_chats_list.count(), 1)
+
+    def test_deleting_a_saved_chat_removes_its_messages_too(self):
+        db = self.get_db()
+        first = db.create_conversation("First Chat")
+        first_chat_turn = db.add_message(first, "user", "First user turn")
+        first_assistant_turn = db.add_message(
+            first, "assistant", "First assistant turn"
+        )
+        second = db.create_conversation("Second Chat")
+        second_chat_turn = db.add_message(second, "user", "Second chat turn")
+
+        gui = self.build_gui()
+        gui.saved_chats_list.setCurrentRow(0)
+
+        with patch.object(gui, "_confirm_deletion", return_value=True):
+            gui._delete_saved_chat()
+
+        remaining = db.get_all_conversations()
+        self.assertEqual([record["id"] for record in remaining], [first])
+        self.assertEqual(gui.saved_chats_list.count(), 1)
+        self.assertEqual(db.get_messages_for_conversation(second), [])
+        self.assertEqual(
+            [message["id"] for message in remaining[0]["messages"]],
+            [first_chat_turn, first_assistant_turn],
+        )
+        self.assertEqual(
+            [message["content"] for message in remaining[0]["messages"]],
+            ["First user turn", "First assistant turn"],
+        )
+
+    def test_delete_asks_confirmation_before_touching_the_database(self):
+        db = self.get_db()
+        only = db.create_conversation("Only Chat")
+        db.add_message(only, "user", "Only chat turn")
+
+        gui = self.build_gui()
+        gui.saved_chats_list.setCurrentRow(0)
+
+        with patch("app.ui.luna.QMessageBox") as message_box:
+            message_box.question.return_value = message_box.Yes
+
+            gui._delete_saved_chat()
+
+            self.assertEqual(message_box.question.call_count, 1)
+            self.assertEqual(
+                message_box.question.call_args[0][1], "Delete saved chat?"
+            )
+            self.assertIn("Only Chat", message_box.question.call_args[0][2])
+
+        self.assertEqual(db.get_all_conversations(), [])
+        self.assertEqual(db.get_messages_for_conversation(only), [])
+        self.assertEqual(gui._saved_chat_records, [])
+        self.assertEqual(gui.saved_chats_list.count(), 1)
+
+    def test_declining_the_confirmation_prompt_keeps_the_saved_chat(self):
+        db = self.get_db()
+        only = db.create_conversation("Only Chat")
+        db.add_message(only, "user", "Only chat turn")
+
+        gui = self.build_gui()
+        gui.saved_chats_list.setCurrentRow(0)
+
+        with patch("app.ui.luna.QMessageBox") as message_box:
+            message_box.question.return_value = message_box.No
+
+            gui._delete_saved_chat()
+
+        self.assertEqual(message_box.question.call_count, 1)
+        self.assertEqual(
+            [record["id"] for record in db.get_all_conversations()], [only]
+        )
+        self.assertEqual(len(db.get_messages_for_conversation(only)), 1)
+        self.assertEqual(gui.saved_chats_list.count(), 1)
+
+    def test_delete_without_selection_deletes_nothing(self):
+        db = self.get_db()
+        first = db.create_conversation("First Chat")
+        db.add_message(first, "user", "First user turn")
+
+        gui = self.build_gui()
+
+        self.assertEqual(gui.saved_chats_list.currentRow(), -1)
+
+        gui._delete_saved_chat()
+
+        self.assertEqual(
+            [record["id"] for record in db.get_all_conversations()], [first]
+        )
+        self.assertEqual(len(db.get_messages_for_conversation(first)), 1)
+        self.assertEqual(gui.saved_chats_list.count(), 1)
+
+    def test_delete_with_an_out_of_range_selection_deletes_nothing(self):
+        db = self.get_db()
+        first = db.create_conversation("First Chat")
+        db.add_message(first, "user", "First user turn")
+
+        gui = self.build_gui()
+        gui.saved_chats_list.setCurrentRow(5)
+
+        gui._delete_saved_chat()
+
+        self.assertEqual(
+            [record["id"] for record in db.get_all_conversations()], [first]
+        )
+        self.assertEqual(len(db.get_messages_for_conversation(first)), 1)
+        self.assertEqual(gui.saved_chats_list.count(), 1)
+
+    def test_database_failure_on_delete_never_breaks_the_gui(self):
+        db = self.get_db()
+        only = db.create_conversation("Only Chat")
+        db.add_message(only, "user", "Only chat turn")
+
+        gui = self.build_gui()
+        gui.saved_chats_list.setCurrentRow(0)
+
+        delete_failure = OSError("database write failed")
+
+        with patch.object(gui, "_confirm_deletion", return_value=True):
+            with patch.object(db, "delete_conversation", side_effect=delete_failure):
+                gui._delete_saved_chat()
+
+        self.assertEqual(
+            [record["id"] for record in db.get_all_conversations()], [only]
+        )
+        self.assertEqual(len(db.get_messages_for_conversation(only)), 1)
+        self.assertEqual(gui.saved_chats_list.count(), 1)
+
+    def test_refresh_stays_in_sync_after_deleting_the_newest_saved_chat(self):
+        db = self.get_db()
+        older = db.create_conversation("Older Chat")
+        db.add_message(older, "user", "Older chat turn")
+        newer = db.create_conversation("Newer Chat")
+        db.add_message(newer, "user", "Newer chat turn")
+
+        gui = self.build_gui()
+        self.assertEqual(
+            [record["id"] for record in gui._saved_chat_records], [newer, older]
+        )
+        self.assertEqual(gui.saved_chats_list.count(), 2)
+
+        gui.saved_chats_list.setCurrentRow(0)
+
+        with patch.object(gui, "_confirm_deletion", return_value=True):
+            gui._delete_saved_chat()
+
+        self.assertEqual(
+            [record["id"] for record in gui._saved_chat_records], [older]
+        )
+        self.assertEqual(gui.saved_chats_list.count(), 1)
+
+
+
 
 if __name__ == "__main__":
     unittest.main()

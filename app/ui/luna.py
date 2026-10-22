@@ -162,6 +162,54 @@ class LunaGUI(QMainWindow):
             f"Opened saved chat #{conversation_id} ({len(messages)} messages)"
         )
 
+    def _delete_saved_chat(self) -> None:
+        """Delete the selected saved conversation after an explicit confirmation."""
+        row = self.saved_chats_list.currentRow()
+        if row < 0 or row >= len(self._saved_chat_records):
+            self.status_bar.showMessage(
+                "Select a saved chat in the list, then click Delete."
+            )
+            return
+
+        conversation = self._saved_chat_records[row]
+        conversation_id = conversation.get("id")
+
+        if not self._confirm_deletion(conversation):
+            self.status_bar.showMessage("Delete cancelled - the saved chat is kept.")
+            return
+
+        try:
+            Database.get_instance().delete_conversation(conversation_id)
+        except Exception:  # noqa: S110
+            self.status_bar.showMessage(
+                f"Delete failed for saved chat #{conversation_id}."
+            )
+            return
+
+        # Rebuild the list and the record cache so the deleted entry disappears.
+        self._refresh_saved_chats()
+        self.status_bar.showMessage(
+            f"Deleted saved chat #{conversation_id} and its messages."
+        )
+
+    def _confirm_deletion(self, conversation: dict) -> bool:
+        """Ask before deleting; only an explicit Yes is treated as confirmation."""
+        title = str(conversation.get("title") or "Untitled").strip()
+        conversation_id = conversation.get("id")
+        message_count = len(conversation.get("messages") or [])
+
+        return (
+            QMessageBox.question(
+                self,
+                "Delete saved chat?",
+                f"Delete '{title}' (#{conversation_id}) and its "
+                f"{message_count} messages? This cannot be undone.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            == QMessageBox.Yes
+        )
+
     def _saved_messages(self, conversation_id: int) -> list[dict]:
         """Return one conversation's messages in creation order, [] if failed."""
         try:
@@ -302,6 +350,19 @@ class LunaGUI(QMainWindow):
             "min-width: 80px;"
         )
         saved_chats_actions.addWidget(self.saved_chats_open)
+
+        # Delete the selected saved conversation after a confirmation prompt
+        # (red so it reads as a destructive action next to Open).
+        self.saved_chats_delete = QPushButton("Delete")
+        self.saved_chats_delete.clicked.connect(self._delete_saved_chat)
+        self.saved_chats_delete.setStyleSheet(
+            "background-color: #dc2626;"
+            "color: white;"
+            "border-radius: 8px; padding: 8px 20px;"
+            "font-weight: bold;"
+            "min-width: 80px;"
+        )
+        saved_chats_actions.addWidget(self.saved_chats_delete)
 
         saved_chats_actions.setAlignment(Qt.AlignHCenter)
         main_layout.addLayout(saved_chats_actions)
