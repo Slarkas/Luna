@@ -165,6 +165,67 @@ class TestDatabase(unittest.TestCase):
         self.assertEqual(remaining_conversations, 0)
         self.assertEqual(remaining_messages, 0)
 
+    def test_get_all_conversations_orders_newest_first(self):
+        db = self.get_db()
+
+        created_ids = [
+            db.create_conversation(f"Conv {index}") for index in range(1, 4)
+        ]
+
+        listed = db.get_all_conversations()
+
+        self.assertEqual([item["id"] for item in listed], list(reversed(created_ids)))
+        self.assertEqual(
+            [item["title"] for item in listed],
+            ["Conv 3", "Conv 2", "Conv 1"],
+        )
+
+    def test_get_messages_ordered_chronologically(self):
+        db = self.get_db()
+        conversation_id = db.create_conversation("Chronology")
+
+        for index in range(4):
+            db.add_message(conversation_id, "user", f"Message {index}")
+
+        messages = db.get_messages_for_conversation(conversation_id)
+
+        self.assertEqual(
+            [message["id"] for message in messages],
+            sorted(message["id"] for message in messages),
+        )
+        self.assertEqual(
+            [message["content"] for message in messages],
+            [f"Message {index}" for index in range(4)],
+        )
+
+    def test_delete_conversation_removes_messages_via_public_api(self):
+        db = self.get_db()
+        conversation_id = db.create_conversation("Delete Me")
+
+        db.add_message(conversation_id, "user", "First")
+        db.add_message(conversation_id, "assistant", "Second")
+
+        db.delete_conversation(conversation_id)
+
+        self.assertEqual(db.get_messages_for_conversation(conversation_id), [])
+        self.assertTrue(
+            all(item["id"] != conversation_id for item in db.get_all_conversations())
+        )
+
+    def test_delete_nonexistent_conversation_is_safe(self):
+        db = self.get_db()
+        db.create_conversation("Keep Me")
+
+        before = db.get_all_conversations()
+
+        db.delete_conversation(999999)
+
+        after = db.get_all_conversations()
+
+        self.assertEqual(len(after), len(before))
+        self.assertTrue(all(item["id"] != 999999 for item in after))
+
+
 
 if __name__ == "__main__":
     unittest.main()
