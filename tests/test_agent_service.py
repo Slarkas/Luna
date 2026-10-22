@@ -39,6 +39,7 @@ TEST_MODEL = "test-deployment-alias"
 PROVIDER_REPLY = "A canned provider reply."
 EMPTY_MESSAGE_ERROR = "Error: Message cannot be empty."
 OLD_ECHO_TEXT = "I received your message:"
+TEST_CONVERSATION_ID = 7
 
 class ConfigError(Exception):
     """Stand-in for a provider-configuration failure raised by ``Config()``.
@@ -89,6 +90,40 @@ class _ResponseStub:
     def read(self) -> bytes:
         """Return the canned response body."""
         return self._body
+
+
+class _DatabaseStub:
+    """Stand-in for the ``Database`` singleton that counts access and records writes.
+
+    Attributes:
+        opened: How many times the service asked the singleton for its instance.
+        conversations: How many times the service asked for a new conversation.
+        writes: The ``(conversation_id, role, content)`` turns the service asked
+            to persist, in the order it asked for them.
+    """
+
+    def __init__(self) -> None:
+        """Prepare a stub with no access and no recorded writes yet."""
+        self.opened = 0
+        self.conversations = 0
+        self.writes: list[tuple[int, str, str]] = []
+
+    def get_instance(self):
+        """Count the request and hand the same stub back as the instance."""
+        self.opened += 1
+        return self
+
+    def initialize(self, **_kwargs) -> None:
+        """Note that the schema was requested; the stub has none to build."""
+
+    def create_conversation(self, title: str) -> int:
+        """Return a stable conversation id for the stub to write into."""
+        self.conversations += 1
+        return TEST_CONVERSATION_ID
+
+    def add_message(self, conversation_id: int, role: str, content: str) -> None:
+        """Record one persisted turn."""
+        self.writes.append((conversation_id, role, content))
 
 
 def _completion_payload(text: str) -> bytes:
@@ -400,6 +435,153 @@ class TestAgentService(unittest.TestCase):
             with self.assertRaises(ConfigError) as raised:
                 service.process_message("Hello, LUNA!")
         self.assertEqual(str(raised.exception), "provider_model is required")
+
+    # ================ History Recording (Opt-In Persistence) Tests ================
+
+    def test_recording_starts_off_and_the_database_is_never_reached(self) -> None:
+        """Test the default service answers without opening or writing the database."""
+        service = AgentService()
+        stub = _TransportStub(_completion_payload(PROVIDER_REPLY))
+        database = _DatabaseStub()
+        with patch("app.agent.service.Config", return_value=_configured_config()), patch(
+            "app.agent.provider.urlopen", stub
+        ), patch("app.agent.service.Database", new=database):
+            result = service.process_message("Hello, LUNA!")
+        self.assertEqual(result, PROVIDER_REPLY)
+        self.assertEqual(stub.request_count, 1)
+        self.assertEqual(database.opened, 0)
+        self.assertEqual(database.conversations, 0)
+        self.assertEqual(database.writes, [])
+        self.assertIsNone(service.current_conversation_id)
+
+    def test_recording_off_still_reuses_the_provider_for_every_message(self) -> None:
+        """Test messages answered with recording off behave like baseline messages."""
+        service = AgentService()
+        stub = _TransportStub(
+            _completion_payload(PROVIDER_REPLY),
+            _completion_payload(PROVIDER_REPLY),
+        )
+        database = _DatabaseStub()
+        with patch("app.agent.service.Config", return_value=_configured_config()), patch(
+            "app.agent.provider.urlopen", stub
+        ), patch("app.agent.service.Database", new=database):
+            first = service.process_message("one")
+            second = service.process_message("two")
+        self.assertEqual(first, PROVIDER_REPLY)
+        self.assertEqual(second, PROVIDER_REPLY)
+        self.assertEqual(stub.request_count, 2)
+        self.assertEqual(database.opened, 0)
+        self.assertEqual(database.writes, [])
+
+    def test_the_recording_toggle_never_opens_or_writes_the_database(self) -> None:
+        """Test switching the flag is a plain flag flip that touches no storage."""
+        service = AgentService()
+        database = _DatabaseStub()
+        with patch("app.agent.service.Database", new=database):
+            service.enable_history_recording()
+            service.disable_history_recording()
+        self.assertEqual(database.opened, 0)
+        self.assertEqual(database.writes, [])
+
+    def test_enabling_recording_writes_both_turns_in_the_baseline_order(self) -> None:
+        """Test one opted-in exchange opens the database once and stores both turns."""
+        service = AgentService()
+        stub = _TransportStub(_completion_payload(PROVIDER_REPLY))
+        database = _DatabaseStub()
+        with patch("app.agent.service.Config", return_value=_configured_config()), patch(
+            "app.agent.provider.urlopen", stub
+        ), patch("app.agent.service.Database", new=database):
+            service.enable_history_recording()
+            result = service.process_message("Hello, LUNA!")
+        self.assertEqual(result, PROVIDER_REPLY)
+        self.assertEqual(stub.request_count, 1)
+        self.assertEqual(database.opened, 1)
+        self.assertEqual(database.conversations, 1)
+        self.assertEqual(
+            database.writes,
+            [
+                (TEST_CONVERSATION_ID, "user", "Hello, LUNA!"),
+                (TEST_CONVERSATION_ID, "assistant", PROVIDER_REPLY),
+            ],
+        )
+        self.assertEqual(service.current_conversation_id, TEST_CONVERSATION_ID)
+
+    def test_recording_on_reuses_the_conversation_created_for_the_first_message(self) -> None:
+        """Test later opted-in messages do not open extra conversations or answers."""
+        service = AgentService()
+        stub = _TransportStub(
+            _completion_payload(PROVIDER_REPLY),
+            _completion_payload(PROVIDER_REPLY),
+        )
+        database = _DatabaseStub()
+        with patch("app.agent.service.Config", return_value=_configured_config()), patch(
+            "app.agent.provider.urlopen", stub
+        ), patch("app.agent.service.Database", new=database):
+            service.enable_history_recording()
+            service.process_message("one")
+            service.process_message("two")
+        self.assertEqual(stub.request_count, 2)
+        self.assertEqual(database.conversations, 1)
+        self.assertEqual(len(database.writes), 4)
+        self.assertEqual(
+            [role for _conversation_id, role, _content in database.writes],
+            ["user", "assistant", "user", "assistant"],
+        )
+
+    def test_disabling_recording_stops_later_writes_but_keeps_every_answer(self) -> None:
+        """Test switching back off keeps provider answers and writes nothing further."""
+        service = AgentService()
+        stub = _TransportStub(
+            _completion_payload(PROVIDER_REPLY),
+            _completion_payload(PROVIDER_REPLY),
+        )
+        database = _DatabaseStub()
+        with patch("app.agent.service.Config", return_value=_configured_config()), patch(
+            "app.agent.provider.urlopen", stub
+        ), patch("app.agent.service.Database", new=database):
+            service.enable_history_recording()
+            stored = service.process_message("Stored")
+            service.disable_history_recording()
+            result = service.process_message("Ignored")
+        self.assertEqual(stored, PROVIDER_REPLY)
+        self.assertEqual(result, PROVIDER_REPLY)
+        self.assertEqual(stub.request_count, 2)
+        self.assertEqual(
+            database.writes,
+            [
+                (TEST_CONVERSATION_ID, "user", "Stored"),
+                (TEST_CONVERSATION_ID, "assistant", PROVIDER_REPLY),
+            ],
+        )
+
+    def test_recording_on_never_stores_a_provider_failure_notice(self) -> None:
+        """Test an opted-in provider outage shows the notice and saves only requests."""
+        service = AgentService()
+        stub = _TransportStub(error=ProviderHTTPError("upstream returned 500"))
+        database = _DatabaseStub()
+        with patch("app.agent.service.Config", return_value=_configured_config()), patch(
+            "app.agent.provider.urlopen", stub
+        ), patch("app.agent.service.Database", new=database):
+            service.enable_history_recording()
+            result = service.process_message("Hello, LUNA!")
+        self.assertEqual(result, PROVIDER_FAILURE_ERROR)
+        self.assertEqual(stub.request_count, 1)
+        self.assertEqual(
+            database.writes, [(TEST_CONVERSATION_ID, "user", "Hello, LUNA!")]
+        )
+
+    def test_recording_on_still_answers_when_the_database_cannot_be_opened(self) -> None:
+        """Test an opted-in message keeps its provider answer when the open fails."""
+        service = AgentService()
+        stub = _TransportStub(_completion_payload(PROVIDER_REPLY))
+        with patch("app.agent.service.Config", return_value=_configured_config()), patch(
+            "app.agent.provider.urlopen", stub
+        ), patch("app.agent.service.Database") as database_factory:
+            database_factory.get_instance.side_effect = sqlite3.Error("unreadable file")
+            service.enable_history_recording()
+            result = service.process_message("Hello, LUNA!")
+        self.assertEqual(result, PROVIDER_REPLY)
+        self.assertEqual(stub.request_count, 1)
 
     # ==================== Provider Singleton Tests ====================
 

@@ -1,4 +1,35 @@
-"""LUNA Agent service providing message processing with persistence."""
+"""LUNA Agent service providing message processing with persistence.
+
+Baseline requirement: Luna answers the user's message through the configured
+model provider, and when the provider is unavailable or fails Luna reports the
+failure clearly instead of inventing a reply - no assistant record is persisted
+when the assistant never produced one. The user message may be empty and is
+rejected without reaching the provider or the database. When a response is
+produced, the system persists both the user message and the provider's
+response as messages in a conversation. Luna keeps answering whether or not a
+database can be reached.
+
+Persistence is now opt-in through two public methods on AgentService:
+enable_history_recording switches recording on and disable_history_recording
+switches it back off. The flag starts off, so a service that never opts in
+never opens the database and never writes anything. The flag decides only
+whether the database is opened and whether the turns of a later
+process_message are written - it never changes what is asked of the provider,
+what the provider returns, or what process_message returns.
+
+The baseline wrote both turns to the database on every processed message.
+Recording being opt-in and defaulting to off is a deliberate deviation from
+that baseline, and the deviation is made visible by the recording gate in
+process_message below.
+
+Examples:
+    service = AgentService()
+    service.process_message("Hello")            # provider answer, nothing written
+    service.enable_history_recording()
+    service.process_message("Hello")            # same answer, both turns saved
+    service.disable_history_recording()
+    service.process_message("Hello")            # same answer, nothing written
+"""
 
 from __future__ import annotations
 
@@ -29,7 +60,21 @@ SERVICE_FAILURE_MESSAGE = "An internal error occurred while processing your mess
 
 
 class AgentService:
-    """Provides message processing for the LUNA agent."""
+    """Provides message processing for the LUNA agent.
+
+    The service answers every processed message through the configured provider
+    and never invents a reply when the provider is unavailable or fails.
+    Persisting the exchange is opt-in: enable_history_recording switches
+    recording on and disable_history_recording switches it back off, and the
+    flag starts off, so a service that never opts in leaves the database
+    untouched. Switching the flag only changes whether the database is opened
+    and written; it never changes the provider request or the response.
+
+    Examples:
+        service = AgentService()
+        service.enable_history_recording()
+        service.process_message("Hello")  # provider answer, exchange persisted
+    """
 
     # Class-level singleton instance and lock for thread-safe creation
     _instance: "AgentService" | None = None  # type: ignore[assignment]
@@ -43,6 +88,10 @@ class AgentService:
         if not hasattr(self, "_provider_client"):
             # Built on demand the first time a response is requested.
             self._provider_client: ProviderClient | None = None
+        if not hasattr(self, "_history_recording"):
+            # Recording is opt-in and starts off; a caller turns it on with
+            # enable_history_recording when it wants the exchange persisted.
+            self._history_recording: bool = False
 
 
     def __new__(cls) -> AgentService:
@@ -67,24 +116,45 @@ class AgentService:
             "Error: Message cannot be empty." When the provider is unusable or
             fails, returns a visible provider error message; the echo response
             is never returned because the assistant never produced it.
+
+        Persisting the exchange is opt-in: with history recording switched on
+        both turns are written in the baseline order, and with it off - the
+        untouched default - the database is never opened and nothing at all is
+        written. Recording never changes the provider request, the provider
+        response, or the value returned here.
+
+        Examples:
+            service.process_message("Hello")  # provider answer, nothing written
+            service.enable_history_recording()
+            service.process_message("Hello")  # same answer, exchange persisted
         """
         # Validate the input message first - return early if invalid
         if not message or not message.strip():
             return EMPTY_MESSAGE_ERROR
 
-        # Get database instance once and ensure a conversation exists. Opening
-        # the database is protected as well: a database that cannot be reached
-        # must never block the answer the user asked for.
-        try:
-            db = Database.get_instance()
-        except Exception:  # noqa: S110
+        # Persistence is opt-in: the database is only opened while history
+        # recording is switched on, so with the flag off the whole exchange is
+        # answered and returned without any database being touched at all.
+        if self._history_recording:
+            # Get database instance once and ensure a conversation exists. Opening
+            # the database is protected as well: a database that cannot be reached
+            # must never block the answer the user asked for.
+            try:
+                db = Database.get_instance()
+            except Exception:  # noqa: S110
+                db = None
+            conversation_id: int | None = self._ensure_conversation(db)
+        else:
+            # Recording off is the untouched default: no database, no conversation.
             db = None
-        conversation_id: int | None = self._ensure_conversation(db)
+            conversation_id = None
 
         if conversation_id is None:
-            # Conversation creation failed - still answer through the provider
+            # Conversation creation failed or recording is switched off - still
+            # answer through the provider, with nothing persisted anywhere.
             return self._provider_response(message)
 
+        # Recording is the only way to get here, and only with a live database.
         if db is not None:
             try:
                 # Save user message via the single add_message call (role validation handled there)
@@ -122,8 +192,37 @@ class AgentService:
 
         return self._conversation_id  # type: ignore
 
+    def enable_history_recording(self) -> None:
+        """Switch history recording on so later exchanges are persisted.
+
+        Returns:
+            None. Nothing is opened, read, or written here: the flag only
+            decides whether later process_message calls touch the database.
+
+        Examples:
+            service.enable_history_recording()
+            service.process_message("Hello")  # provider answer, both turns saved
+        """
+        self._history_recording = True
+
+    def disable_history_recording(self) -> None:
+        """Switch history recording back off, the default for a fresh service.
+
+        Returns:
+            None. Conversations and messages already in the database stay as
+            they are; only later exchanges stop being written.
+
+        Examples:
+            service.disable_history_recording()
+            service.process_message("Hello")  # same answer, nothing written
+        """
+        self._history_recording = False
+
     def _ensure_conversation(self, db: Database | None) -> int | None:
         """Create an initial conversation if one does not exist.
+
+        Only called while history recording is switched on, so a service that
+        never opts in never reaches this helper and never opens the database.
 
         Args:
             db: The database instance to use for creating the conversation.
