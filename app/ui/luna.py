@@ -11,6 +11,36 @@ import sys
 from app.agent.service import AgentService
 from app.storage.database import Database
 
+# Styling for the Saved Chats list. Titles must be legible before anything is
+# selected, so the list gets an opaque dark background (a translucent one washes
+# the labels into the sidebar) and the ::item rule sets the text colour directly,
+# which is where Qt actually applies it. Both selected states are spelled out so
+# a selected row keeps light text on dark indigo whether the list has focus or not.
+SAVED_CHATS_LIST_STYLE = (
+    "QListWidget {"
+    "background-color: #101a24;"
+    "color: #f8fafc;"
+    "border: 1px solid #475569;"
+    "border-radius: 6px;"
+    "padding: 4px;"
+    "font-size: 12px;"
+    "}"
+    "QListWidget::item {"
+    "color: #f8fafc;"
+    "background-color: transparent;"
+    "spacing: 4px;"
+    "padding: 2px 6px 2px 6px;"
+    "}"
+    "QListWidget::item:selected:active {"
+    "color: #ffffff;"
+    "background-color: #4f46e5;"
+    "}"
+    "QListWidget::item:selected:inactive {"
+    "color: #f8fafc;"
+    "background-color: #3730a3;"
+    "}"
+)
+
 
 class LunaGUI(QMainWindow):
     """Main GUI window for the LUNA application."""
@@ -19,6 +49,7 @@ class LunaGUI(QMainWindow):
         super().__init__()
         self.setWindowTitle("LUNA")
         self.setMinimumSize(700, 500)
+        self._apply_initial_window_size()
 
         # Chat history recording is opt-in and always starts OFF for a new
         # application session.
@@ -31,6 +62,32 @@ class LunaGUI(QMainWindow):
         self._saved_chat_records: list[dict] = []
 
         self._setup_ui()
+
+    def _apply_initial_window_size(self) -> None:
+        """Open the window at roughly twice the minimum layout size.
+
+        The starting size is twice the minimum the UI needs, but it is capped
+        by the screen's available area so the window never spills off the
+        display. Only the initial size is set - the window keeps its default
+        resizable behaviour between that minimum and the screen limit.
+        """
+        minimum_width = self.minimumSize().width()
+        minimum_height = self.minimumSize().height()
+
+        initial_width = minimum_width * 2
+        initial_height = minimum_height * 2
+
+        screen = self.screen()
+        if screen is not None:
+            available = screen.availableSize()
+            if available.width() > 0 and available.height() > 0:
+                initial_width = min(initial_width, available.width())
+                initial_height = min(initial_height, available.height())
+
+        self.resize(
+            max(initial_width, minimum_width),
+            max(initial_height, minimum_height),
+        )
 
     def _on_send_clicked(self) -> None:
         """Handle Send button click - submit text to conversation."""
@@ -130,8 +187,16 @@ class LunaGUI(QMainWindow):
         )
 
     def _open_saved_chat(self) -> None:
-        """Show the selected saved conversation in the existing chat area."""
+        """Show one selected saved conversation in the existing chat area."""
         row = self.saved_chats_list.currentRow()
+        if row < 0:
+            # Multi-selection leaves no current row when the user selected rows
+            # with the selection model instead of clicking one item; opening
+            # stays single-conversation, so the topmost selected row is used.
+            selected_rows = self._selected_chat_rows()
+            if selected_rows:
+                row = selected_rows[0]
+
         if row < 0 or row >= len(self._saved_chat_records):
             self.status_bar.showMessage(
                 "Select a saved chat in the list, then click Open."
@@ -162,48 +227,143 @@ class LunaGUI(QMainWindow):
             f"Opened saved chat #{conversation_id} ({len(messages)} messages)"
         )
 
+    def _selected_chat_indexes(self) -> list[int]:
+        """Return the rows the list itself marks as selected, [] if unusable."""
+        try:
+            raw_selection = list(self.saved_chats_list.selectedIndexes())
+        except Exception:  # noqa: S110
+            return []
+
+        rows: list[int] = []
+        for item in raw_selection:
+            # QListWidget reports selection rows as QModelIndex-like values, so
+            # the plain int conversion is tried first and the row accessor second.
+            try:
+                rows.append(int(item))
+            except (TypeError, ValueError):
+                try:
+                    rows.append(int(item.row()))
+                except Exception:  # noqa: S110
+                    continue
+
+        return rows
+
+    def _selected_chat_rows(self) -> list[int]:
+        """Return the selected list rows that still have a cached record.
+
+        Both selection styles count: the list's own multi-selection marks and
+        the current row set by a single click (or setCurrentRow). Rows outside
+        the cached records are dropped so a stale selection can never address a
+        conversation that is not shown in the list.
+        """
+        candidates = list(self._selected_chat_indexes())
+
+        current_row = self.saved_chats_list.currentRow()
+        if current_row >= 0:
+            candidates.append(current_row)
+
+        rows: list[int] = []
+        for row in candidates:
+            if 0 <= row < len(self._saved_chat_records) and row not in rows:
+                rows.append(row)
+
+        return rows
+
+    def _clear_chat_selection(self) -> None:
+        """Drop every selection mark so a stale selection cannot be reused."""
+        try:
+            self.saved_chats_list.clearSelection()
+        except Exception:  # noqa: S110
+            pass
+        self.saved_chats_list.setCurrentRow(-1)
+
     def _delete_saved_chat(self) -> None:
-        """Delete the selected saved conversation after an explicit confirmation."""
-        row = self.saved_chats_list.currentRow()
-        if row < 0 or row >= len(self._saved_chat_records):
+        """Delete every selected saved conversation after one confirmation."""
+        rows = self._selected_chat_rows()
+        if not rows:
             self.status_bar.showMessage(
-                "Select a saved chat in the list, then click Delete."
+                "Select the saved chats to delete in the list, "
+                "then click Delete Selected."
             )
             return
 
-        conversation = self._saved_chat_records[row]
-        conversation_id = conversation.get("id")
+        conversations = [self._saved_chat_records[row] for row in rows]
+        conversation_ids = [
+            conversation.get("id")
+            for conversation in conversations
+            if conversation.get("id") is not None
+        ]
 
-        if not self._confirm_deletion(conversation):
-            self.status_bar.showMessage("Delete cancelled - the saved chat is kept.")
+        if not conversation_ids:
+            self.status_bar.showMessage(
+                "The selected saved chats have no usable id, so nothing was "
+                "deleted."
+            )
+            return
+
+        if not self._confirm_deletion(conversations):
+            self.status_bar.showMessage(
+                f"Delete cancelled - all {len(conversations)} saved chats are kept."
+            )
             return
 
         try:
-            Database.get_instance().delete_conversation(conversation_id)
+            database = Database.get_instance()
         except Exception:  # noqa: S110
             self.status_bar.showMessage(
-                f"Delete failed for saved chat #{conversation_id}."
+                "Delete failed - the database could not be reached."
             )
             return
 
-        # Rebuild the list and the record cache so the deleted entry disappears.
-        self._refresh_saved_chats()
-        self.status_bar.showMessage(
-            f"Deleted saved chat #{conversation_id} and its messages."
-        )
+        deleted_ids: list[int] = []
+        failed_ids: list = []
+        for conversation_id in conversation_ids:
+            try:
+                database.delete_conversation(conversation_id)
+                deleted_ids.append(conversation_id)
+            except Exception:  # noqa: S110
+                failed_ids.append(conversation_id)
 
-    def _confirm_deletion(self, conversation: dict) -> bool:
-        """Ask before deleting; only an explicit Yes is treated as confirmation."""
-        title = str(conversation.get("title") or "Untitled").strip()
-        conversation_id = conversation.get("id")
-        message_count = len(conversation.get("messages") or [])
+        if not deleted_ids:
+            self.status_bar.showMessage(
+                "Delete failed - the saved chats are still in the database."
+            )
+            return
+
+        # Re-read the database so the deleted rows disappear from the list, then
+        # clear both selection marks: the old rows no longer exist.
+        self._refresh_saved_chats()
+        self._clear_chat_selection()
+
+        status = f"Deleted {len(deleted_ids)} saved chat(s) and their messages."
+        if failed_ids:
+            status += " Could not delete: " + ", ".join(
+                f"#{conversation_id}" for conversation_id in failed_ids
+            )
+        self.status_bar.showMessage(status)
+
+    def _confirm_deletion(self, conversations: list[dict]) -> bool:
+        """Ask before deleting; only an explicit Yes is treated as confirmed."""
+        count = len(conversations)
+        total_messages = sum(
+            len(conversation.get("messages") or [])
+            for conversation in conversations
+        )
+        listed = ", ".join(
+            f"'{str(conversation.get('title') or 'Untitled').strip()}' "
+            f"(#{conversation.get('id')})"
+            for conversation in conversations[:8]
+        )
+        if count > 8:
+            listed += f" and {count - 8} more"
 
         return (
             QMessageBox.question(
                 self,
                 "Delete saved chat?",
-                f"Delete '{title}' (#{conversation_id}) and its "
-                f"{message_count} messages? This cannot be undone.",
+                f"Delete {count} selected conversation(s) and their "
+                f"{total_messages} messages? Listed: {listed}. "
+                "This cannot be undone.",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
@@ -235,12 +395,31 @@ class LunaGUI(QMainWindow):
 
     def _setup_ui(self) -> None:
         """Build the main window UI components."""
-        # Central widget and layout
+        # Central widget split into two columns: a narrow Saved Chats sidebar on
+        # the left and the main chat area on the right, so conversation display
+        # and saved-chat management no longer share one vertical stack.
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
 
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(20, 20, 20, 20)
+        body_layout = QHBoxLayout(central_widget)
+        body_layout.setContentsMargins(20, 20, 20, 20)
+
+        # Left sidebar: the saved-chat list plus its Refresh/Open/Delete buttons.
+        sidebar = QWidget()
+        sidebar.setMinimumWidth(240)
+        sidebar.setMaximumWidth(320)
+        sidebar_layout = QVBoxLayout(sidebar)
+
+        # Main chat area: message display and the input controls. The stretch
+        # factor makes it take all the leftover width, so it always keeps most
+        # of the window while the sidebar stays a narrow column.
+        main_area = QWidget()
+        main_area.setMinimumWidth(420)
+
+        body_layout.addWidget(sidebar)
+        body_layout.addWidget(main_area, stretch=1)
+
+        main_layout = QVBoxLayout(main_area)
 
         # Conversation display area with welcome message
         chat_container = QWidget()  # Container for message widgets
@@ -320,14 +499,15 @@ class LunaGUI(QMainWindow):
 
         main_layout.addLayout(input_section, stretch=1)
 
-        # Saved Chats section - lists conversations saved while History was ON
-        # (newest first), rebuilds the list on Refresh, and shows the messages
-        # of the selected conversation in the chat area above on Open.
+        # Saved Chats sidebar (left column) - lists conversations saved while
+        # History was ON (newest first), rebuilds the list on Refresh, and shows
+        # the messages of the selected conversation in the chat area on Open. The
+        # list and the three buttons stack vertically inside the narrow column.
         saved_chats_header = QLabel("Saved Chats")
         saved_chats_header.setStyleSheet("font-weight: bold; color: #93c5fd;")
-        main_layout.addWidget(saved_chats_header)
+        sidebar_layout.addWidget(saved_chats_header)
 
-        saved_chats_actions = QHBoxLayout()
+        saved_chats_actions = QVBoxLayout()
 
         self.saved_chats_refresh = QPushButton("Refresh")
         self.saved_chats_refresh.clicked.connect(self._refresh_saved_chats)
@@ -351,9 +531,10 @@ class LunaGUI(QMainWindow):
         )
         saved_chats_actions.addWidget(self.saved_chats_open)
 
-        # Delete the selected saved conversation after a confirmation prompt
-        # (red so it reads as a destructive action next to Open).
-        self.saved_chats_delete = QPushButton("Delete")
+        # Delete every conversation the user has selected in the list after one
+        # confirmation prompt (red so it reads as a destructive action next to
+        # Open). Only the selected ids are removed - see _delete_saved_chat.
+        self.saved_chats_delete = QPushButton("Delete Selected")
         self.saved_chats_delete.clicked.connect(self._delete_saved_chat)
         self.saved_chats_delete.setStyleSheet(
             "background-color: #dc2626;"
@@ -365,22 +546,19 @@ class LunaGUI(QMainWindow):
         saved_chats_actions.addWidget(self.saved_chats_delete)
 
         saved_chats_actions.setAlignment(Qt.AlignHCenter)
-        main_layout.addLayout(saved_chats_actions)
+        sidebar_layout.addLayout(saved_chats_actions)
 
         self.saved_chats_list = QListWidget()
-        self.saved_chats_list.setStyleSheet(
-            "QListWidget {"
-            "color: #e5e7eb;"
-            "spacing: 4px;"
-            "background-color: rgba(148, 163, 184, 0.08);"
-            "}"
-            "QListWidget::item:selected {"
-            "background-color: #4f46e5;"
-            "color: white;"
-            "}"
-        )
+        # See SAVED_CHATS_LIST_STYLE: opaque background plus an explicit ::item
+        # colour keep conversation titles readable, and both selected states keep
+        # light text so a marked row never goes dark-on-dark.
+        self.saved_chats_list.setStyleSheet(SAVED_CHATS_LIST_STYLE)
+        # MultipleSelection lets one Delete Selected click act on several
+        # conversations; SelectRows highlights and selects a whole row.
+        self.saved_chats_list.setSelectionMode(QListWidget.MultiSelection)
+        self.saved_chats_list.setSelectionBehavior(QListWidget.SelectRows)
         self.saved_chats_list.setMinimumHeight(140)
-        main_layout.addWidget(self.saved_chats_list)
+        sidebar_layout.addWidget(self.saved_chats_list)
 
         # Status bar
         self.status_bar = QStatusBar()

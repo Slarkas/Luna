@@ -14,8 +14,8 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-from app.ui.luna import LunaGUI
-from PySide6.QtWidgets import QApplication, QLabel
+from app.ui.luna import LunaGUI, SAVED_CHATS_LIST_STYLE
+from PySide6.QtWidgets import QApplication, QLabel, QListWidget
 from app.storage.database import Database
 
 USER_PREFIX = "User:"
@@ -235,7 +235,7 @@ class TestSavedChatsUI(unittest.TestCase):
         gui = self.build_gui()
 
         self.assertTrue(hasattr(gui, "saved_chats_delete"))
-        self.assertEqual(gui.saved_chats_delete.text(), "Delete")
+        self.assertEqual(gui.saved_chats_delete.text(), "Delete Selected")
 
         gui.saved_chats_delete.clicked.emit()
 
@@ -414,6 +414,269 @@ class TestSavedChatsUI(unittest.TestCase):
         )
         self.assertEqual(gui.saved_chats_list.count(), 1)
 
+
+
+
+    def test_saved_chats_list_style_stays_readable_when_unselected(self):
+        """The opaque list background and explicit ::item colours are kept."""
+        gui = self.build_gui()
+
+        # No translucent background: a washed-out panel is what made titles
+        # unreadable before.
+        self.assertNotIn("rgba(", SAVED_CHATS_LIST_STYLE)
+        self.assertIn("background-color: #101a24;", SAVED_CHATS_LIST_STYLE)
+
+        # Item text colour is set on the item rule itself, the place Qt applies
+        # it, so titles are light on dark before anything is selected.
+        item_rule = SAVED_CHATS_LIST_STYLE.split("QListWidget::item {")[1]
+        self.assertIn("color: #f8fafc;", item_rule)
+
+        # Both selected states keep light text on a dark highlight so a marked
+        # row never becomes dark-on-dark, focused or not.
+        active_rule = SAVED_CHATS_LIST_STYLE.split(
+            "QListWidget::item:selected:active {"
+        )[1]
+        inactive_rule = SAVED_CHATS_LIST_STYLE.split(
+            "QListWidget::item:selected:inactive {"
+        )[1]
+        self.assertIn("color: #ffffff;", active_rule)
+        self.assertIn("background-color: #4f46e5;", active_rule)
+        self.assertIn("color: #f8fafc;", inactive_rule)
+        self.assertIn("background-color: #3730a3;", inactive_rule)
+
+        self.assertEqual(
+            gui.saved_chats_list.selectionMode(),
+            QListWidget.MultiSelection,
+        )
+
+    def test_multi_selection_marks_several_rows_at_once(self):
+        """selectAll() marks every row, so selection is not limited to one."""
+        db = self.get_db()
+        for title in ("First Chat", "Second Chat", "Third Chat"):
+            conversation_id = db.create_conversation(title)
+            db.add_message(conversation_id, "user", f"{title} turn")
+
+        gui = self.build_gui()
+        self.assertEqual(gui.saved_chats_list.count(), 3)
+
+        gui.saved_chats_list.selectAll()
+
+        self.assertEqual(gui._selected_chat_rows(), [0, 1, 2])
+
+    def test_open_falls_back_to_the_topmost_selected_saved_chat(self):
+        """Multi-selection leaves no current row; opening still shows one chat."""
+        db = self.get_db()
+        older = db.create_conversation("Older Chat")
+        db.add_message(older, "user", "Older chat turn")
+        newer = db.create_conversation("Newer Chat")
+        db.add_message(newer, "assistant", "Newer chat turn")
+
+        gui = self.build_gui()
+        gui.saved_chats_list.selectAll()
+        self.assertEqual(gui.saved_chats_list.currentRow(), -1)
+
+        gui._open_saved_chat()
+
+        self.assertEqual(
+            self.chat_texts()[0], f"Saved chat: Newer Chat (#{newer})"
+        )
+        self.assertEqual(gui.history_button.text(), "History: OFF")
+        self.assertFalse(gui._history_recording)
+
+    def test_opening_a_saved_chat_never_sends_a_provider_request(self):
+        """Reading history must not reach the agent or flip the recording flag."""
+        db = self.get_db()
+        only = db.create_conversation("Only Chat")
+        db.add_message(only, "user", "Only chat turn")
+
+        gui = self.build_gui()
+        gui.saved_chats_list.setCurrentRow(0)
+
+        with patch("app.ui.luna.AgentService") as agent_service:
+            gui._open_saved_chat()
+
+        self.assertEqual(agent_service.process_message.call_count, 0)
+        self.assertEqual(gui.history_button.text(), "History: OFF")
+        self.assertFalse(gui._history_recording)
+
+
+
+    def test_delete_selected_removes_every_selected_saved_chat(self):
+        """Rows 0 and 2 are deleted; row 1 and its messages are kept."""
+        db = self.get_db()
+        older = db.create_conversation("Older Chat")
+        db.add_message(older, "user", "Older chat turn")
+        middle = db.create_conversation("Middle Chat")
+        db.add_message(middle, "user", "Middle chat turn")
+        newer = db.create_conversation("Newer Chat")
+        db.add_message(newer, "user", "Newer chat turn")
+
+        gui = self.build_gui()
+        self.assertEqual(
+            [record["id"] for record in gui._saved_chat_records],
+            [newer, middle, older],
+        )
+
+        # Qt reports selection as QModelIndex values, so the row lookup is
+        # exercised directly with the row numbers the list would report.
+        with patch.object(gui, "_selected_chat_indexes", return_value=[0, 2]):
+            with patch.object(gui, "_confirm_deletion", return_value=True):
+                gui._delete_saved_chat()
+
+        remaining = db.get_all_conversations()
+        self.assertEqual([record["id"] for record in remaining], [middle])
+        self.assertEqual(db.get_messages_for_conversation(newer), [])
+        self.assertEqual(db.get_messages_for_conversation(older), [])
+        self.assertEqual(
+            [message["content"] for message in remaining[0]["messages"]],
+            ["Middle chat turn"],
+        )
+        self.assertEqual(
+            [record["id"] for record in gui._saved_chat_records], [middle]
+        )
+        self.assertEqual(gui.saved_chats_list.count(), 1)
+
+        # The selection is cleared once the rows no longer exist.
+        self.assertEqual(gui.saved_chats_list.currentRow(), -1)
+        self.assertEqual(list(gui.saved_chats_list.selectedIndexes()), [])
+
+    def test_delete_selected_dialog_states_the_conversation_count(self):
+        """The confirmation prompt lists how many conversations go away."""
+        db = self.get_db()
+        older = db.create_conversation("Older Chat")
+        db.add_message(older, "user", "Older chat turn")
+        middle = db.create_conversation("Middle Chat")
+        db.add_message(middle, "user", "Middle chat turn")
+        newer = db.create_conversation("Newer Chat")
+        db.add_message(newer, "user", "Newer chat turn")
+
+        gui = self.build_gui()
+
+        with patch.object(gui, "_selected_chat_indexes", return_value=[0, 1]):
+            with patch("app.ui.luna.QMessageBox") as message_box:
+                message_box.question.return_value = message_box.Yes
+
+                gui._delete_saved_chat()
+
+                self.assertEqual(message_box.question.call_count, 1)
+                self.assertEqual(
+                    message_box.question.call_args[0][1], "Delete saved chat?"
+                )
+                question_text = message_box.question.call_args[0][2]
+
+        self.assertIn("Delete 2 selected", question_text)
+        self.assertIn("their 2 messages", question_text)
+        self.assertIn("Newer Chat", question_text)
+        self.assertIn("Middle Chat", question_text)
+
+    def test_multi_delete_ignores_selections_with_no_saved_chat(self):
+        """An out-of-range row is dropped; only the real selection is deleted."""
+        db = self.get_db()
+        older = db.create_conversation("Older Chat")
+        db.add_message(older, "user", "Older chat turn")
+        newer = db.create_conversation("Newer Chat")
+        db.add_message(newer, "user", "Newer chat turn")
+
+        gui = self.build_gui()
+
+        with patch.object(gui, "_selected_chat_indexes", return_value=[0, 7]):
+            with patch.object(gui, "_confirm_deletion", return_value=True):
+                gui._delete_saved_chat()
+
+        remaining = db.get_all_conversations()
+        self.assertEqual([record["id"] for record in remaining], [older])
+        self.assertEqual(
+            [record["id"] for record in gui._saved_chat_records], [older]
+        )
+        self.assertEqual(len(db.get_messages_for_conversation(older)), 1)
+        self.assertEqual(gui.saved_chats_list.count(), 1)
+
+
+
+    def test_cancelling_the_multi_delete_confirmation_deletes_nothing(self):
+        """A No answer keeps every conversation and every message."""
+        db = self.get_db()
+        older = db.create_conversation("Older Chat")
+        db.add_message(older, "user", "Older chat turn")
+        middle = db.create_conversation("Middle Chat")
+        db.add_message(middle, "user", "Middle chat turn")
+        newer = db.create_conversation("Newer Chat")
+        db.add_message(newer, "user", "Newer chat turn")
+
+        gui = self.build_gui()
+
+        with patch.object(gui, "_selected_chat_indexes", return_value=[0, 1]):
+            with patch("app.ui.luna.QMessageBox") as message_box:
+                message_box.question.return_value = message_box.No
+
+                gui._delete_saved_chat()
+
+        self.assertEqual(
+            [record["id"] for record in db.get_all_conversations()],
+            [newer, middle, older],
+        )
+        for conversation_id in (older, middle, newer):
+            self.assertEqual(
+                len(db.get_messages_for_conversation(conversation_id)), 1
+            )
+        self.assertEqual(gui.saved_chats_list.count(), 3)
+
+    def test_partial_database_failure_keeps_the_failed_saved_chat(self):
+        """One failing delete never crashes the GUI and never deletes extras."""
+        db = self.get_db()
+        older = db.create_conversation("Older Chat")
+        db.add_message(older, "user", "Older chat turn")
+        middle = db.create_conversation("Middle Chat")
+        db.add_message(middle, "user", "Middle chat turn")
+        newer = db.create_conversation("Newer Chat")
+        db.add_message(newer, "user", "Newer chat turn")
+
+        gui = self.build_gui()
+
+        real_delete = db.delete_conversation
+
+        def flaky_delete(conversation_id):
+            if conversation_id == newer:
+                raise OSError("database write failed")
+            real_delete(conversation_id)
+
+        with patch.object(gui, "_selected_chat_indexes", return_value=[0, 1]):
+            with patch.object(gui, "_confirm_deletion", return_value=True):
+                with patch.object(
+                    db, "delete_conversation", side_effect=flaky_delete
+                ):
+                    gui._delete_saved_chat()
+
+        # The newer chat survived, the middle one was removed, and the list was
+        # rebuilt from the database without raising.
+        self.assertEqual(
+            [record["id"] for record in db.get_all_conversations()],
+            [newer, older],
+        )
+        self.assertEqual(db.get_messages_for_conversation(middle), [])
+        self.assertEqual(
+            [record["id"] for record in gui._saved_chat_records], [newer, older]
+        )
+        self.assertEqual(gui.saved_chats_list.count(), 2)
+
+    def test_delete_selected_without_selection_deletes_nothing(self):
+        """No row selected means no confirmation prompt and no database write."""
+        db = self.get_db()
+        first = db.create_conversation("First Chat")
+        db.add_message(first, "user", "First user turn")
+
+        gui = self.build_gui()
+
+        self.assertEqual(gui.saved_chats_list.currentRow(), -1)
+        self.assertEqual(list(gui.saved_chats_list.selectedIndexes()), [])
+
+        gui._delete_saved_chat()
+
+        self.assertEqual(
+            [record["id"] for record in db.get_all_conversations()], [first]
+        )
+        self.assertEqual(len(db.get_messages_for_conversation(first)), 1)
+        self.assertEqual(gui.saved_chats_list.count(), 1)
 
 
 
