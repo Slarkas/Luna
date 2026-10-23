@@ -14,12 +14,12 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-from app.ui.luna import LunaGUI, SAVED_CHATS_LIST_STYLE
-from PySide6.QtWidgets import QApplication, QLabel, QListWidget
+from app.ui.luna import LunaGUI, SAVED_CHATS_LIST_STYLE, SIDEBAR_PANEL_STYLE, MENU_HEADER_STYLE, NAV_ACTIVE_STYLE, NAV_INACTIVE_STYLE
+from PySide6.QtWidgets import QApplication, QFrame, QLabel, QListWidget, QPushButton, QScrollArea, QWidget
 from app.storage.database import Database
 
 USER_PREFIX = "User:"
-AGENT_PREFIX = "Agent:"
+LUNA_PREFIX = "Luna:"
 CHAT_HEADER_PREFIX = "Saved chat:"
 USER_LABEL = "Welcome to LUNA"
 
@@ -150,7 +150,7 @@ class TestSavedChatsUI(unittest.TestCase):
         self.assertIn("First Chat", texts[0])
         self.assertTrue(texts[1].startswith(USER_PREFIX))
         self.assertIn("First user turn", texts[1])
-        self.assertTrue(texts[2].startswith(AGENT_PREFIX))
+        self.assertTrue(texts[2].startswith(LUNA_PREFIX))
         self.assertIn("First assistant turn", texts[2])
         self.assertTrue(texts[3].startswith(USER_PREFIX))
         self.assertIn("Second user turn", texts[3])

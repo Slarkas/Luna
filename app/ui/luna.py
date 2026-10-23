@@ -3,7 +3,7 @@
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit, QMessageBox, QStatusBar,
-    QScrollArea, QListWidget,
+    QScrollArea, QListWidget, QFrame,
 )
 from PySide6.QtCore import Qt
 import sys
@@ -13,7 +13,8 @@ from app.storage.database import Database
 
 # Styling for the Saved Chats list. Titles must be legible before anything is
 # selected, so the list gets an opaque dark background (a translucent one washes
-# the labels into the sidebar) and the ::item rule sets the text colour directly,
+# the labels into the page behind it) and the ::item rule sets the text colour
+# directly,
 # which is where Qt actually applies it. Both selected states are spelled out so
 # a selected row keeps light text on dark indigo whether the list has focus or not.
 SAVED_CHATS_LIST_STYLE = (
@@ -41,6 +42,53 @@ SAVED_CHATS_LIST_STYLE = (
     "}"
 )
 
+# Sidebar navigation styling. Exactly one menu option carries the filled indigo
+# look (the same accent used elsewhere for the active state): the option that
+# owns the section currently open in the content area, or "Back" while the main
+# chat page is showing. The other options stay muted slate so they read as
+# clickable but not current, and the active look is what tells the user which
+# page they are on without hiding the menu itself.
+NAV_ACTIVE_STYLE = (
+    "background-color: #4f46e5;"
+    "color: white;"
+    "border-radius: 8px; padding: 10px 18px;"
+    "font-weight: bold;"
+    "min-width: 110px;"
+)
+NAV_INACTIVE_STYLE = (
+    "background-color: #475569;"
+    "color: #e2e8f0;"
+    "border-radius: 8px; padding: 10px 18px;"
+    "font-weight: bold;"
+    "min-width: 110px;"
+)
+
+# The menu column is drawn as a panel so it reads as a menu rather than as three
+# buttons floating on the page background: the panel is a shade lighter than the
+# window and is closed off on the edge that faces the content area. QFrame (not
+# QWidget) is what makes these two properties paint - a plain QWidget container
+# ignores them - and the border is only ever drawn on the one facing edge, never
+# as a four sided box around the column.
+SIDEBAR_PANEL_STYLE = (
+    "QFrame {"
+    "background-color: #1b1f27;"
+    "border-right: 1px solid #3b424f;"
+    "}"
+)
+
+# Header label above the options: it names the column so the eye reads a menu
+# (Menu / Chat History / Settings / Back) top down instead of loose buttons, and
+# the hairline under it separates the heading from the options it introduces.
+MENU_HEADER_STYLE = (
+    "QLabel {"
+    "font-size: 14px;"
+    "font-weight: bold;"
+    "color: #93c5fd;"
+    "padding-bottom: 6px;"
+    "border-bottom: 1px solid #3b424f;"
+    "}"
+)
+
 
 class LunaGUI(QMainWindow):
     """Main GUI window for the LUNA application."""
@@ -60,6 +108,11 @@ class LunaGUI(QMainWindow):
         # list is rebuilt from this record list so opening an entry never needs
         # another database read.
         self._saved_chat_records: list[dict] = []
+
+        # Which section the content area is showing. The sidebar menu is always
+        # visible; only the content it points at changes, and a new session
+        # starts on the main chat page rather than inside a menu section.
+        self._current_view: str = "chat"
 
         self._setup_ui()
 
@@ -94,6 +147,12 @@ class LunaGUI(QMainWindow):
         input_text = self.input_edit.text().strip()
         if not input_text:
             return
+
+        # The message lands in the chat display, so make sure that page is the
+        # open one. This is a silent switch: it changes only what is visible,
+        # never the menu structure or the history recording state.
+        self._set_current_view("chat")
+
         _display_user_message(input_text, self.msg_layout)
         self._process_agent_response(input_text)
         self.input_edit.clear()
@@ -138,6 +197,71 @@ class LunaGUI(QMainWindow):
                 "font-weight: bold;"
                 "min-width: 90px;"
             )
+
+    # ------------------------------------------------------------------
+    # Sidebar navigation
+    #
+    # The left sidebar is a persistent menu, so clicking an option only decides
+    # which section the content area shows: the main chat page, the Chat History
+    # section, or the Settings placeholder. Switching sections never reads or
+    # writes the database, never touches the history recording flag or its
+    # button, and never clears the messages already shown in the chat area -
+    # leaving a section is purely a view change.
+    # ------------------------------------------------------------------
+
+    def _on_chat_history_clicked(self) -> None:
+        """Menu option "Chat History" - open the saved-chat history section."""
+        self._set_current_view("history")
+        self.status_bar.showMessage(
+            "Chat History opened - select the rows to act on, then use "
+            "Refresh, Open or Delete Selected."
+        )
+
+    def _on_settings_clicked(self) -> None:
+        """Menu option "Settings" - open the placeholder section."""
+        self._set_current_view("settings")
+        self.status_bar.showMessage(
+            "Settings opened - no settings are configurable yet."
+        )
+
+    def _on_back_clicked(self) -> None:
+        """Leave the open section and return to the main chat page."""
+        self._set_current_view("chat")
+        self.status_bar.showMessage("Back on the main chat page.")
+
+    def _set_current_view(self, view: str) -> None:
+        """Show one content section at a time and mark its menu option active."""
+        if view not in self._view_widgets:
+            return
+
+        self._current_view = view
+        self._apply_view_visibility()
+        self._refresh_navigation_buttons()
+
+    def _apply_view_visibility(self) -> None:
+        """Leave only the current section visible; the others stay built.
+
+        Hiding a section (instead of removing it) keeps its list selection, its
+        buttons and the chat area's messages intact, so going Back to the main
+        page or re-opening Chat History never loses state.
+        """
+        for view, widget in self._view_widgets.items():
+            widget.setVisible(view == self._current_view)
+
+    def _refresh_navigation_buttons(self) -> None:
+        """Mark the menu option that owns the page currently showing."""
+        self.nav_history_button.setStyleSheet(
+            NAV_ACTIVE_STYLE if self._current_view == "history"
+            else NAV_INACTIVE_STYLE
+        )
+        self.nav_settings_button.setStyleSheet(
+            NAV_ACTIVE_STYLE if self._current_view == "settings"
+            else NAV_INACTIVE_STYLE
+        )
+        self.nav_back_button.setStyleSheet(
+            NAV_ACTIVE_STYLE if self._current_view == "chat"
+            else NAV_INACTIVE_STYLE
+        )
 
     # ------------------------------------------------------------------
     # Saved chats
@@ -187,7 +311,14 @@ class LunaGUI(QMainWindow):
         )
 
     def _open_saved_chat(self) -> None:
-        """Show one selected saved conversation in the existing chat area."""
+        """Show one selected saved conversation on the main chat page."""
+        # Opening happens from the Chat History section, but the conversation
+        # itself is displayed on the main chat page, so switch the content area
+        # back first. The list selection is deliberately left alone, so a
+        # multi-selected Delete Selected still works right after opening, and no
+        # provider request or database write is involved.
+        self._set_current_view("chat")
+
         row = self.saved_chats_list.currentRow()
         if row < 0:
             # Multi-selection leaves no current row when the user selected rows
@@ -395,31 +526,72 @@ class LunaGUI(QMainWindow):
 
     def _setup_ui(self) -> None:
         """Build the main window UI components."""
-        # Central widget split into two columns: a narrow Saved Chats sidebar on
-        # the left and the main chat area on the right, so conversation display
-        # and saved-chat management no longer share one vertical stack.
+        # Central widget split into two columns: a persistent navigation sidebar
+        # on the left and the content area on the right. The sidebar carries the
+        # menu options and is never swapped out or hidden, so the menu is
+        # reachable from any page; the content area shows one section at a time
+        # (the chat display, the Chat History section, or the Settings
+        # placeholder), and switching sections never rebuilds any of them.
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
 
         body_layout = QHBoxLayout(central_widget)
         body_layout.setContentsMargins(20, 20, 20, 20)
 
-        # Left sidebar: the saved-chat list plus its Refresh/Open/Delete buttons.
-        sidebar = QWidget()
-        sidebar.setMinimumWidth(240)
-        sidebar.setMaximumWidth(320)
+        # Left column: the menu. It stays a narrow column so the content area
+        # always keeps most of the window.
+        #
+        # The menu band is constrained instead of pinned to one width: any fixed
+        # pixel width competes with the content area for space, so a too-wide
+        # menu pushed the chat/input row out of the window and off the display at
+        # the default 80% UI scaling (which is what made the window look blank
+        # with the input row missing). 180 is the narrowest usable menu, 240 is
+        # the widest it may ever take, and the content area absorbs the rest of
+        # the window, so the menu always renders as a slim left column.
+        #
+        # QFrame (not QWidget) so the menu panel and its right edge line are
+        # painted at all: a plain QWidget container ignores them. The two
+        # properties are kept apart so the line only closes the side that faces
+        # the content area and never boxes the whole column.
+        sidebar = QFrame()
+        sidebar.setMinimumWidth(180)
+        sidebar.setMaximumWidth(240)
+        sidebar.setStyleSheet(SIDEBAR_PANEL_STYLE)
         sidebar_layout = QVBoxLayout(sidebar)
 
-        # Main chat area: message display and the input controls. The stretch
-        # factor makes it take all the leftover width, so it always keeps most
-        # of the window while the sidebar stays a narrow column.
-        main_area = QWidget()
-        main_area.setMinimumWidth(420)
+        # Right column: every section lives here, and _apply_view_visibility
+        # leaves only the one matching self._current_view visible.
+        content_area = QWidget()
+        content_area.setMinimumWidth(420)
 
         body_layout.addWidget(sidebar)
-        body_layout.addWidget(main_area, stretch=1)
+        body_layout.addWidget(content_area, stretch=1)
 
-        main_layout = QVBoxLayout(main_area)
+        content_layout = QVBoxLayout(content_area)
+
+        # Menu header plus the options. Chat History and Settings open a section
+        # in the content area; Back leaves the menu as it is and returns to the
+        # main chat page.
+        menu_header = QLabel("Menu")
+        menu_header.setStyleSheet(MENU_HEADER_STYLE)
+        sidebar_layout.addWidget(menu_header)
+
+        self.nav_history_button = QPushButton("Chat History")
+        self.nav_history_button.clicked.connect(self._on_chat_history_clicked)
+        self.nav_history_button.setStyleSheet(NAV_INACTIVE_STYLE)
+        sidebar_layout.addWidget(self.nav_history_button)
+
+        self.nav_settings_button = QPushButton("Settings")
+        self.nav_settings_button.clicked.connect(self._on_settings_clicked)
+        self.nav_settings_button.setStyleSheet(NAV_INACTIVE_STYLE)
+        sidebar_layout.addWidget(self.nav_settings_button)
+
+        # Back is the way out of a section: it changes only which section the
+        # content area shows, never what the menu looks like structurally.
+        self.nav_back_button = QPushButton("Back")
+        self.nav_back_button.clicked.connect(self._on_back_clicked)
+        self.nav_back_button.setStyleSheet(NAV_ACTIVE_STYLE)
+        sidebar_layout.addWidget(self.nav_back_button)
 
         # Conversation display area with welcome message
         chat_container = QWidget()  # Container for message widgets
@@ -439,7 +611,7 @@ class LunaGUI(QMainWindow):
         welcome_label.setStyleSheet("font-weight: bold; color: #3b82f6;")
         msg_layout.addWidget(welcome_label)
 
-        main_layout.addWidget(chat_scroll, stretch=1)
+        content_layout.addWidget(chat_scroll, stretch=1)
 
         # Input section layout
         input_section = QHBoxLayout()
@@ -497,15 +669,22 @@ class LunaGUI(QMainWindow):
         # Set horizontal alignment for the input section layout
         input_section.setAlignment(Qt.AlignHCenter)
 
-        main_layout.addLayout(input_section, stretch=1)
+        content_layout.addLayout(input_section, stretch=1)
 
-        # Saved Chats sidebar (left column) - lists conversations saved while
-        # History was ON (newest first), rebuilds the list on Refresh, and shows
-        # the messages of the selected conversation in the chat area on Open. The
-        # list and the three buttons stack vertically inside the narrow column.
-        saved_chats_header = QLabel("Saved Chats")
+        # Chat History section - shown only when the Chat History menu option is
+        # opened. It lists the conversations saved while History was ON (newest
+        # first), rebuilds the list on Refresh, shows the messages of the
+        # selected conversation on the main chat page on Open, and deletes every
+        # selected conversation on Delete Selected. The header, the three action
+        # buttons and the list live in their own container so switching sections
+        # only changes visibility, never the widgets or their selection state.
+        history_view = QWidget()
+        self.history_view = history_view
+        history_layout = QVBoxLayout(history_view)
+
+        saved_chats_header = QLabel("Chat History")
         saved_chats_header.setStyleSheet("font-weight: bold; color: #93c5fd;")
-        sidebar_layout.addWidget(saved_chats_header)
+        history_layout.addWidget(saved_chats_header)
 
         saved_chats_actions = QVBoxLayout()
 
@@ -546,7 +725,7 @@ class LunaGUI(QMainWindow):
         saved_chats_actions.addWidget(self.saved_chats_delete)
 
         saved_chats_actions.setAlignment(Qt.AlignHCenter)
-        sidebar_layout.addLayout(saved_chats_actions)
+        history_layout.addLayout(saved_chats_actions)
 
         self.saved_chats_list = QListWidget()
         # See SAVED_CHATS_LIST_STYLE: opaque background plus an explicit ::item
@@ -558,14 +737,51 @@ class LunaGUI(QMainWindow):
         self.saved_chats_list.setSelectionMode(QListWidget.MultiSelection)
         self.saved_chats_list.setSelectionBehavior(QListWidget.SelectRows)
         self.saved_chats_list.setMinimumHeight(140)
-        sidebar_layout.addWidget(self.saved_chats_list)
+        history_layout.addWidget(self.saved_chats_list)
+
+        # Settings section - shown only when the Settings menu option is opened,
+        # and only a placeholder: opening it changes nothing else on the page,
+        # in the chat area, or in the history recording state.
+        settings_view = QWidget()
+        self.settings_view = settings_view
+        settings_layout = QVBoxLayout(settings_view)
+        settings_layout.setAlignment(Qt.AlignTop)
+
+        settings_header = QLabel("Settings")
+        settings_header.setStyleSheet("font-weight: bold; color: #93c5fd;")
+        settings_layout.addWidget(settings_header)
+
+        settings_placeholder = QLabel(
+            "Settings are not available yet - this option is a placeholder "
+            "only, so opening it changes nothing."
+        )
+        settings_placeholder.setStyleSheet("color: #94a3b8;")
+        settings_placeholder.setWordWrap(True)
+        settings_layout.addWidget(settings_placeholder)
+
+        # Both sections are inserted above the input row so an opened section
+        # becomes the page's focus area while the input row stays where the main
+        # chat page keeps it. Only one section is ever visible (_apply_view
+        # visibility), so stacking them in one column never competes for space.
+        content_layout.insertWidget(0, history_view, stretch=1)
+        content_layout.insertWidget(0, settings_view, stretch=1)
+
+        self._view_widgets = {
+            "chat": chat_scroll,
+            "history": history_view,
+            "settings": settings_view,
+        }
 
         # Status bar
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
 
-        # Show the chats already saved in a previous session, newest first.
+        # Show the chats already saved in a previous session, newest first, even
+        # though the Chat History section is not open yet, and open the window on
+        # the main chat page so the menu shows Back as the current option.
         self._refresh_saved_chats()
+        self._apply_view_visibility()
+        self._refresh_navigation_buttons()
 
 
 def _display_user_message(text: str, msg_layout: QVBoxLayout) -> None:
@@ -587,7 +803,7 @@ def _display_user_message(text: str, msg_layout: QVBoxLayout) -> None:
 
 def _display_agent_message(text: str, msg_layout: QVBoxLayout) -> None:
     """Display an agent message in the conversation area."""
-    msg_label = QLabel(f"Agent:\n{text}")
+    msg_label = QLabel(f"Luna:\n{text}")
 
     msg_style = (
         "background-color: #10b981;"
