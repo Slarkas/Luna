@@ -92,7 +92,6 @@ class ChatView(QWidget):
         super().__init__(parent)
         self._setup_ui()
         self.voice_text_received.connect(self._insert_voice_text)
-        self.voice_text_ready.connect(self._insert_voice_text)
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)

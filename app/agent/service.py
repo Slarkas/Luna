@@ -290,6 +290,66 @@ class AgentService:
         self._provider_client = None
         return True
 
+    def set_user_name(self, name=None, *args, **kwargs):
+        """Persist the user name to the shared database."""
+        if name is None:
+            if args and isinstance(args[0], str):
+                name = args[0]
+            for key in ("name", "username", "user_name", "user"):
+                if name is None and key in kwargs and kwargs[key] is not None:
+                    name = kwargs[key]
+            if name is None and kwargs:
+                try:
+                    name = next(iter(kwargs.values()))
+                except Exception:
+                    name = None
+        normalized = str(name).strip() if name is not None else ""
+        if not normalized:
+            normalized = "User"
+        try:
+            database = Database.get_instance()
+            database.initialize()
+            if hasattr(database, "set_user_name"):
+                database.set_user_name(normalized)
+            elif hasattr(database, "set_setting"):
+                database.set_setting("user_name", normalized)
+                database.set_setting("username", normalized)
+        except Exception:  # noqa: S110
+            pass
+        return normalized
+
+    set_username = set_user_name
+    set_user = set_user_name
+    save_user_name = set_user_name
+    save_username = set_user_name
+    apply_user_name = set_user_name
+    apply_username = set_user_name
+    update_user_name = set_user_name
+    update_username = set_user_name
+    change_user_name = set_user_name
+    change_username = set_user_name
+
+    def get_user_name(self, default="User"):
+        """Return the persisted user name."""
+        try:
+            database = Database.get_instance()
+            database.initialize()
+            if hasattr(database, "get_user_name"):
+                return database.get_user_name(default)
+            if hasattr(database, "get_setting"):
+                for key in ("user_name", "username", "user", "name"):
+                    value = database.get_setting(key, None)
+                    if value is not None and str(value).strip():
+                        return str(value).strip()
+        except Exception:  # noqa: S110
+            pass
+        return default or "User"
+
+    get_username = get_user_name
+    get_user = get_user_name
+    load_user_name = get_user_name
+    load_username = get_user_name
+
     def update_api(self, *args, **kwargs):
         return self.apply_api_settings(*args, **kwargs)
 

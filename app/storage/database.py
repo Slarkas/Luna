@@ -3,23 +3,16 @@
 
 from __future__ import annotations
 
-import os
 import sqlite3
 import threading
 from pathlib import Path
 
 
 def _get_default_db_path() -> Path:
-    """Return Luna's persistent database path on Windows."""
-    appdata = os.environ.get("APPDATA")
-
-    if appdata:
-        base_path = Path(appdata)
-    else:
-        # Safe absolute fallback if APPDATA is unavailable.
-        base_path = Path.home() / "AppData" / "Roaming"
-
-    return base_path / "Luna" / "luna.db"
+    """Return Luna's persistent database path inside the storage folder."""
+    # Keep the SQLite file next to this module (app/storage) so it stays with
+    # the project's storage folder instead of being scattered in %APPDATA%.
+    return Path(__file__).resolve().parent / "luna.db"
 
 
 _DEFAULT_DB_PATH = _get_default_db_path()
@@ -98,6 +91,12 @@ class Database:
                             REFERENCES conversations(id)
                             ON DELETE CASCADE
                             ON UPDATE CASCADE
+                    );
+
+                    CREATE TABLE IF NOT EXISTS settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
                     """
                 )
@@ -203,6 +202,124 @@ class Database:
     def get_connection(self) -> sqlite3.Connection:
         """Return the active connection for database queries."""
         return self._require_connection()
+
+    def _ensure_settings_table(self) -> None:
+        """Create the settings table if it does not already exist."""
+        with self._lock:
+            connection = self._require_connection()
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            connection.commit()
+
+    _USERNAME_SETTING_KEYS = {"user_name", "username", "user", "name"}
+
+    def get_setting(self, key, default=None):
+        """Return a stored setting value, or *default* when it is absent."""
+        if key is None:
+            return default
+        key = str(key)
+        self._ensure_settings_table()
+
+        # User-name spellings are kept in sync, so reading any of them returns
+        # the first non-empty value that was stored under any spelling.
+        if key in self._USERNAME_SETTING_KEYS:
+            with self._lock:
+                connection = self._require_connection()
+                for candidate in ("user_name", "username", "user", "name"):
+                    row = connection.execute(
+                        "SELECT value FROM settings WHERE key = ?",
+                        (candidate,),
+                    ).fetchone()
+                    if row is not None:
+                        try:
+                            value = row["value"]
+                        except Exception:
+                            value = row[0] if row else None
+                        if value is not None and str(value).strip():
+                            return value
+            return default
+
+        with self._lock:
+            connection = self._require_connection()
+            row = connection.execute(
+                "SELECT value FROM settings WHERE key = ?",
+                (key,),
+            ).fetchone()
+            if row is None:
+                return default
+            try:
+                return row["value"]
+            except Exception:
+                return row[0] if row else default
+
+    def set_setting(self, key, value):
+        """Store a setting value, creating or updating its row."""
+        if key is None:
+            return False
+        key = str(key)
+        value = "" if value is None else str(value)
+        self._ensure_settings_table()
+
+        # Keep all user-name spellings in sync with one another.
+        keys = (
+            ("user_name", "username", "user", "name")
+            if key in self._USERNAME_SETTING_KEYS
+            else (key,)
+        )
+        with self._lock:
+            connection = self._require_connection()
+            for item in keys:
+                cursor = connection.execute(
+                    "UPDATE settings SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = ?",
+                    (value, item),
+                )
+                if cursor.rowcount == 0:
+                    connection.execute(
+                        "INSERT INTO settings (key, value) VALUES (?, ?)",
+                        (item, value),
+                    )
+            connection.commit()
+            return True
+
+    get_settings = get_setting
+    set_settings = set_setting
+    read_setting = get_setting
+    write_setting = set_setting
+    save_setting = set_setting
+    load_setting = get_setting
+
+    def get_user_name(self, default="User"):
+        """Return the persisted user name, falling back to *default*."""
+        for key in ("user_name", "username", "user", "name"):
+            value = self.get_setting(key, None)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        return default or "User"
+
+    def set_user_name(self, name):
+        """Persist the user name and return the normalized value."""
+        normalized = str(name).strip() if name is not None else ""
+        if not normalized:
+            normalized = "User"
+        for key in ("user_name", "username", "user", "name"):
+            self.set_setting(key, normalized)
+        return normalized
+
+    get_username = get_user_name
+    set_username = set_user_name
+    get_user = get_user_name
+    set_user = set_user_name
+    load_user_name = get_user_name
+    save_user_name = set_user_name
+    load_username = get_user_name
+    save_username = set_user_name
 
     def close(self) -> None:
         """Close the database connection safely."""

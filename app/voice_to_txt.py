@@ -45,7 +45,7 @@ def _load_model():
         if _MODEL is None:
             if whisper is None:
                 raise RuntimeError("openai-whisper is not installed")
-            _MODEL = whisper.load_model("tiny")
+            _MODEL = whisper.load_model("base")
         return _MODEL
 
 

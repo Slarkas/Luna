@@ -50,6 +50,25 @@ class LunaGUI(QMainWindow):
         self._message_queue = []
         self._processing_message = False
         self.user_name = "User"
+
+        # Restore the user name saved in a previous session, if any.
+        try:
+            database = Database.get_instance()
+            database.initialize()
+            stored_name = None
+            if hasattr(database, "get_user_name"):
+                stored_name = database.get_user_name("User")
+            elif hasattr(database, "get_setting"):
+                stored_name = database.get_setting("user_name", None)
+                if stored_name is None:
+                    stored_name = database.get_setting("username", None)
+            if isinstance(stored_name, str) and stored_name.strip():
+                self.user_name = stored_name.strip()
+        except Exception:  # noqa: S110
+            pass
+
+        global USER_NAME
+        USER_NAME = self.user_name
         global CURRENT_GUI
         CURRENT_GUI = self
 
@@ -224,10 +243,17 @@ class LunaGUI(QMainWindow):
                         response = "An internal error occurred while processing your message."
                 else:
                     response = result["value"]
-                    try:
-                        self.chat_view.set_api_connected(True)
-                    except Exception:
-                        pass
+                    lowered = str(response).strip().lower()
+                    if lowered == "api is not connected" or lowered.startswith("error:"):
+                        try:
+                            self.chat_view.set_api_connected(False)
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            self.chat_view.set_api_connected(True)
+                        except Exception:
+                            pass
                 _display_agent_message(response, self.msg_layout)
                 QTimer.singleShot(0, self._process_next_queued)
 
@@ -276,6 +302,7 @@ class LunaGUI(QMainWindow):
         self.user_name = name
         global USER_NAME
         USER_NAME = name
+        self._persist_user_name(name)
         self.status_bar.showMessage("User name updated.")
 
     def _on_username_changed(self, *args, **kwargs) -> None:
@@ -302,6 +329,7 @@ class LunaGUI(QMainWindow):
         self.user_name = name
         global USER_NAME
         USER_NAME = name
+        self._persist_user_name(name)
 
     def _on_new_chat_clicked(self) -> None:
         """Start a fresh chat: clear the chat area and reset conversation state."""
@@ -312,6 +340,19 @@ class LunaGUI(QMainWindow):
         except Exception:
             pass
         self.status_bar.showMessage("New chat started.")
+
+    def _persist_user_name(self, name: str) -> None:
+        """Persist the user name to the shared database, never raising."""
+        try:
+            database = Database.get_instance()
+            database.initialize()
+            if hasattr(database, "set_user_name"):
+                database.set_user_name(name)
+            elif hasattr(database, "set_setting"):
+                database.set_setting("user_name", name)
+                database.set_setting("username", name)
+        except Exception:  # noqa: S110
+            pass
 
     # Aliases for alternative naming.
     _start_new_chat = _on_new_chat_clicked
@@ -408,9 +449,6 @@ class LunaGUI(QMainWindow):
 
     def _process_agent_response(self, message: str) -> None:
         """Process the agent's response and display it in the conversation."""
-        if not self._is_api_connected():
-            _display_agent_message("api is not connected", self.msg_layout)
-            return
         import threading
 
         from PySide6.QtCore import QEventLoop, QTimer
@@ -441,6 +479,17 @@ class LunaGUI(QMainWindow):
             response = "An internal error occurred while processing your message."
         else:
             response = result["value"]
+            lowered = str(response).strip().lower()
+            if lowered == "api is not connected" or lowered.startswith("error:"):
+                try:
+                    self.chat_view.set_api_connected(False)
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.chat_view.set_api_connected(True)
+                except Exception:
+                    pass
         _display_agent_message(response, self.msg_layout)
 
     def _setup_ui(self) -> None:
