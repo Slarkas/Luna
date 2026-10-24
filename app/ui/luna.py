@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QLabel, QStatusBar,
 )
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon
 
 from app.agent.service import AgentService
 from app.storage.database import Database
@@ -16,6 +17,9 @@ from app.ui.chat_history_view import ChatHistoryView
 from app.ui.chat_view import ChatView
 from app.ui.sidebar import Sidebar
 from app.ui.ui_settings import UISettings
+WINDOW_ICON_PATH = os.path.join(
+    os.path.dirname(__file__), "img", "icon_1.jpg"
+).replace("\\", "/")
 WINDOW_BACKGROUND_IMAGE = os.path.join(
     os.path.dirname(__file__), "img", "menu_1.jpg"
 ).replace("\\", "/")
@@ -33,6 +37,7 @@ class LunaGUI(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("LUNA")
+        self.setWindowIcon(QIcon(WINDOW_ICON_PATH))
         self.setMinimumSize(700, 500)
         self._apply_initial_window_size()
 
