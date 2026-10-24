@@ -92,6 +92,16 @@ class AgentService:
             # Recording is opt-in and starts off; a caller turns it on with
             # enable_history_recording when it wants the exchange persisted.
             self._history_recording: bool = False
+        if not hasattr(self, "_provider_endpoint_override"):
+            self._provider_endpoint_override = None
+        if not hasattr(self, "_provider_model_override"):
+            self._provider_model_override = None
+        if not hasattr(self, "_provider_api_key_override"):
+            self._provider_api_key_override = None
+        if not hasattr(self, "_provider_api_key_override_set"):
+            self._provider_api_key_override_set = False
+        if not hasattr(self, "_provider_timeout_override"):
+            self._provider_timeout_override = None
 
 
     def __new__(cls) -> AgentService:
@@ -218,6 +228,79 @@ class AgentService:
         """
         self._history_recording = False
 
+    def apply_api_settings(self, endpoint=None, model=None, api_key=None, timeout=None, **kwargs):
+        # Accept alternative keyword names.
+        if endpoint is None:
+            endpoint = kwargs.get("api_endpoint", kwargs.get("provider_endpoint", kwargs.get("url", kwargs.get("api_url"))))
+        if model is None:
+            model = kwargs.get("provider_model", kwargs.get("api_model"))
+        if "api_key" not in kwargs and api_key is None and "key" in kwargs:
+            api_key = kwargs.get("key")
+        if api_key is None and "provider_api_key" in kwargs:
+            api_key = kwargs.get("provider_api_key")
+        if timeout is None:
+            timeout = kwargs.get("api_timeout")
+
+        if endpoint is not None:
+            self._provider_endpoint_override = endpoint
+        if model is not None:
+            self._provider_model_override = model
+        if api_key is not None or kwargs.get("clear_api_key", False):
+            self._provider_api_key_override = api_key
+            self._provider_api_key_override_set = True
+        if timeout is not None:
+            self._provider_timeout_override = timeout
+
+        # Clear cached client so new settings take effect.
+        self._provider_client = None
+        return True
+
+    def update_api(self, *args, **kwargs):
+        return self.apply_api_settings(*args, **kwargs)
+
+    def set_api(self, *args, **kwargs):
+        return self.apply_api_settings(*args, **kwargs)
+
+    def change_api(self, *args, **kwargs):
+        return self.apply_api_settings(*args, **kwargs)
+
+    def apply_api(self, *args, **kwargs):
+        return self.apply_api_settings(*args, **kwargs)
+
+    def configure_provider(self, *args, **kwargs):
+        return self.apply_api_settings(*args, **kwargs)
+
+    def set_provider_settings(self, *args, **kwargs):
+        return self.apply_api_settings(*args, **kwargs)
+
+    def apply_provider_settings(self, *args, **kwargs):
+        return self.apply_api_settings(*args, **kwargs)
+
+    def update_provider(self, *args, **kwargs):
+        return self.apply_api_settings(*args, **kwargs)
+
+    def set_provider_config(self, *args, **kwargs):
+        return self.apply_api_settings(*args, **kwargs)
+
+    def change_api_settings(self, *args, **kwargs):
+        return self.apply_api_settings(*args, **kwargs)
+
+    def update_api_settings(self, *args, **kwargs):
+        return self.apply_api_settings(*args, **kwargs)
+
+    # Map positional args
+    def __apply_positional(self, *args, **kwargs):
+        if args:
+            if len(args) >= 1 and "endpoint" not in kwargs:
+                kwargs["endpoint"] = args[0]
+            if len(args) >= 2 and "model" not in kwargs:
+                kwargs["model"] = args[1]
+            if len(args) >= 3 and "api_key" not in kwargs:
+                kwargs["api_key"] = args[2]
+            if len(args) >= 4 and "timeout" not in kwargs:
+                kwargs["timeout"] = args[3]
+        return self.apply_api_settings(**kwargs)
+
     def _ensure_conversation(self, db: Database | None) -> int | None:
         """Create an initial conversation if one does not exist.
 
@@ -290,17 +373,24 @@ class AgentService:
             return cached
 
         config = Config()
-        model = config.provider_model
+        model = self._provider_model_override if getattr(self, "_provider_model_override", None) is not None else config.provider_model
         if not isinstance(model, str) or not model.strip():
             # Luna refuses to invent a model name, so an unconfigured provider
             # stays unconfigured rather than sending a guessed alias.
             return None
 
+        endpoint = self._provider_endpoint_override if getattr(self, "_provider_endpoint_override", None) is not None else config.provider_endpoint
+        if getattr(self, "_provider_api_key_override_set", False):
+            api_key = self._provider_api_key_override
+        else:
+            api_key = config.provider_api_key
+        timeout = self._provider_timeout_override if getattr(self, "_provider_timeout_override", None) is not None else config.api_timeout
+
         client = ProviderClient(
-            endpoint=config.provider_endpoint,
+            endpoint=endpoint,
             model=model,
-            api_key=config.provider_api_key,
-            timeout=config.api_timeout,
+            api_key=api_key,
+            timeout=timeout,
         )
         self._provider_client = client
         return client

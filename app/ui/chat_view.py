@@ -15,18 +15,43 @@ AgentService interaction, conversation state, and view switching stay in
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QTextOption
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 # Styling shared with the rest of the application.
 CHAT_INPUT_STYLE = ""
+
+class ChatInput(QTextEdit):
+    """A multi-line chat input whose text starts at the top."""
+
+    returnPressed = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setAcceptRichText(False)
+        self.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+
+    def text(self) -> str:
+        return self.toPlainText()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not (
+            event.modifiers() & Qt.ShiftModifier
+        ):
+            self.returnPressed.emit()
+            return
+        super().keyPressEvent(event)
+
+
 
 
 class ChatView(QWidget):
@@ -82,7 +107,7 @@ class ChatView(QWidget):
 
         # Welcome message at the top of the scroll area
         welcome_label = QLabel("Welcome to LUNA — Ask me anything.")
-        welcome_label.setStyleSheet("font-weight: bold; color: #3b82f6;")
+        welcome_label.setStyleSheet("font-weight: bold; color: white;")
         msg_layout.addWidget(welcome_label)
 
         layout.addWidget(chat_scroll, stretch=1)
@@ -101,10 +126,12 @@ class ChatView(QWidget):
         input_section.addWidget(status_label)
 
         # Text input field
-        input_edit = QLineEdit()
+        input_edit = ChatInput()
         input_edit.setPlaceholderText("Enter your message...")
         input_edit.returnPressed.connect(self._on_send_clicked)
         input_edit.setMinimumWidth(300)
+        input_edit.setMinimumHeight(120)
+        input_edit.setStyleSheet("color: white; font-size: 16px; padding: 8px; background-color: rgba(0, 0, 0, 0.35);")
         self.input_edit = input_edit
         input_section.addWidget(input_edit, stretch=1)
 

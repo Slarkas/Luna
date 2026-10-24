@@ -2,7 +2,7 @@
 
 import unittest
 
-from PySide6.QtWidgets import QApplication, QLineEdit, QPushButton
+from PySide6.QtWidgets import QApplication, QTextEdit, QPushButton
 from PySide6.QtTest import QSignalSpy
 
 from app.ui.chat_view import ChatView
@@ -18,7 +18,7 @@ class TestChatView(unittest.TestCase):
         self.view = ChatView()
 
     def test_has_expected_controls(self):
-        self.assertIsInstance(self.view.input_edit, QLineEdit)
+        self.assertIsInstance(self.view.input_edit, QTextEdit)
         self.assertIsInstance(self.view.send_button, QPushButton)
         self.assertIsInstance(self.view.history_button, QPushButton)
 

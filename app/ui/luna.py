@@ -1,5 +1,9 @@
 """LUNA — Modular Windows desktop AI assistant GUI."""
 
+import sys
+
+import os
+
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QStatusBar,
@@ -11,6 +15,12 @@ from app.storage.database import Database
 from app.ui.chat_history_view import ChatHistoryView
 from app.ui.chat_view import ChatView
 from app.ui.sidebar import Sidebar
+from app.ui.ui_settings import UISettings
+WINDOW_BACKGROUND_IMAGE = os.path.join(
+    os.path.dirname(__file__), "img", "menu_1.jpg"
+).replace("\\", "/")
+
+
 
 
 class LunaGUI(QMainWindow):
@@ -59,6 +69,25 @@ class LunaGUI(QMainWindow):
             max(initial_width, minimum_width),
             max(initial_height, minimum_height),
         )
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._apply_dark_title_bar()
+
+    def _apply_dark_title_bar(self) -> None:
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+
+            hwnd = int(self.winId())
+            value = ctypes.c_int(1)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 20, ctypes.byref(value), ctypes.sizeof(value)
+            )
+        except Exception:
+            pass
+
 
     def _on_send_clicked(self) -> None:
         """Backward-compatible entry point: read the current input and submit."""
@@ -139,11 +168,16 @@ class LunaGUI(QMainWindow):
         )
 
     def _on_settings_clicked(self) -> None:
-        """Menu option "Settings" - open the placeholder section."""
+        """Menu option "Settings" - open the settings section."""
         self._set_current_view("settings")
-        self.status_bar.showMessage(
-            "Settings opened - no settings are configurable yet."
-        )
+        self.status_bar.showMessage("Settings opened.")
+
+    def _on_api_settings_applied(self, **kwargs) -> None:
+        try:
+            AgentService().apply_api_settings(**kwargs)
+        except Exception:  # noqa: S110
+            pass
+        self.status_bar.showMessage("API settings updated.")
 
     def _on_back_clicked(self) -> None:
         """Leave the open section and return to the main chat page."""
@@ -247,10 +281,15 @@ class LunaGUI(QMainWindow):
         # (the chat display, the Chat History section, or the Settings
         # placeholder), and switching sections never rebuilds any of them.
         central_widget = QWidget()
+        central_widget.setObjectName("centralWidget")
+        central_widget.setStyleSheet(
+            f"#centralWidget {{ border-image: url({WINDOW_BACKGROUND_IMAGE}) 0 0 0 0 stretch stretch; }}"
+        )
         self.setCentralWidget(central_widget)
 
         body_layout = QHBoxLayout(central_widget)
-        body_layout.setContentsMargins(20, 20, 20, 20)
+        body_layout.setContentsMargins(-19, 0, 20, 0)
+        body_layout.setSpacing(0)
 
         # Left column: the menu. It stays a narrow column so the content area
         # always keeps most of the window.
@@ -273,6 +312,10 @@ class LunaGUI(QMainWindow):
         self.nav_history_button = self.sidebar.nav_history_button
         self.nav_settings_button = self.sidebar.nav_settings_button
         self.nav_back_button = self.sidebar.nav_back_button
+        self.settings_button = self.nav_settings_button
+        self.history_button = self.nav_history_button
+        self.back_button = self.nav_back_button
+        self.new_chat_button = self.nav_back_button
         # Only the primary signals drive LunaGUI logic; the aliases exist for
         # compatibility with external callers/tests and must not be connected
         # here, otherwise a single click would fire the handler multiple times.
@@ -286,6 +329,7 @@ class LunaGUI(QMainWindow):
         # leaves only the one matching self._current_view visible.
         content_area = QWidget()
         content_area.setMinimumWidth(420)
+        content_area.setStyleSheet("background: transparent;")
 
         body_layout.addWidget(self.sidebar)
         body_layout.addWidget(content_area, stretch=1)
@@ -296,6 +340,10 @@ class LunaGUI(QMainWindow):
         # Send button and history toggle, and reports submissions/toggles via
         # signals; provider calls and conversation state stay in LunaGUI.
         self.chat_view = ChatView()
+        self.chat_view.setStyleSheet("background: transparent;")
+        self.chat_view.chat_scroll.setStyleSheet("background: transparent;")
+        self.chat_view.chat_scroll.viewport().setStyleSheet("background: transparent;")
+        self.chat_view.chat_container.setStyleSheet("background: transparent;")
         self.chat_container = self.chat_view.chat_container
         self.chat_scroll = self.chat_view.chat_scroll
         self.msg_layout = self.chat_view.msg_layout
@@ -320,32 +368,33 @@ class LunaGUI(QMainWindow):
 
         # Status bar - must be created before connecting chat_history signals
         self.status_bar = QStatusBar()
+        self.status_bar.setStyleSheet(
+            "QStatusBar { background-color: rgba(0, 0, 0, 0.7); color: white; }"
+        )
         self.setStatusBar(self.status_bar)
 
         # Chat History section - a self-contained widget. Luna only reacts to
         # its signals: opening a conversation and showing status messages.
         self.chat_history = ChatHistoryView()
+        self.chat_history.setStyleSheet("background: transparent;")
         self.chat_history.open_requested.connect(self._open_saved_chat)
         self.chat_history.status_message.connect(self.status_bar.showMessage)
         # Settings section - shown only when the Settings menu option is opened,
         # and only a placeholder: opening it changes nothing else on the page,
         # in the chat area, or in the history recording state.
-        settings_view = QWidget()
-        self.settings_view = settings_view
-        settings_layout = QVBoxLayout(settings_view)
-        settings_layout.setAlignment(Qt.AlignTop)
-
-        settings_header = QLabel("Settings")
-        settings_header.setStyleSheet("font-weight: bold; color: #93c5fd;")
-        settings_layout.addWidget(settings_header)
-
-        settings_placeholder = QLabel(
-            "Settings are not available yet - this option is a placeholder "
-            "only, so opening it changes nothing."
+        self.settings_view = UISettings(
+            get_agent_service=AgentService,
+            apply_api_callback=self._on_api_settings_applied,
         )
-        settings_placeholder.setStyleSheet("color: #94a3b8;")
-        settings_placeholder.setWordWrap(True)
-        settings_layout.addWidget(settings_placeholder)
+        self.settings_view.setStyleSheet("background: transparent;")
+        self.settings = self.settings_view
+        settings_view = self.settings_view
+        if hasattr(self.settings_view, "back_clicked"):
+            self.settings_view.back_clicked.connect(self._on_back_clicked)
+        if hasattr(self.settings_view, "back_requested"):
+            self.settings_view.back_requested.connect(self._on_back_clicked)
+        if hasattr(self.settings_view, "status_message"):
+            self.settings_view.status_message.connect(self.status_bar.showMessage)
 
         # Both sections are inserted above the input row so an opened section
         # becomes the page's focus area while the input row stays where the main
@@ -374,8 +423,9 @@ def _display_user_message(text: str, msg_layout: QVBoxLayout) -> None:
 
     msg_label.setWordWrap(True)
     msg_style = (
-        "background-color: #3b82f6;"
+        "background-color: transparent;"
         "color: white;"
+        "border: 1px solid rgba(59, 130, 246, 0.8);"
         "border-radius: 12px;"
         "margin: 4px 12px;"
         "padding: 8px 16px;"
@@ -390,8 +440,9 @@ def _display_agent_message(text: str, msg_layout: QVBoxLayout) -> None:
     msg_label = QLabel(f"Luna:\n{text}")
 
     msg_style = (
-        "background-color: #10b981;"
+        "background-color: transparent;"
         "color: white;"
+        "border: 1px solid rgba(16, 185, 129, 0.8);"
         "border-radius: 12px;"
         "margin: 4px 12px;"
         "padding: 8px 16px;"
