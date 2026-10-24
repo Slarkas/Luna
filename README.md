@@ -12,7 +12,16 @@ Luna is designed as a structured, extensible base for building intelligent agent
 python run_luna.py
 ```
 
-## Running Tests
+## Configuration
+
+Luna talks to an OpenAI-compatible chat-completions endpoint. By default it uses
+`http://localhost:1235/v1` with the model served there. Override via environment
+variables:
+
+- `LUNA_PROVIDER_ENDPOINT` — API base URL (default `http://localhost:1235/v1`).
+- `LUNA_MODEL` — model name to request.
+- `LUNA_API_KEY` — optional API key for authenticated endpoints.
+
 
 ```bash
 python -m unittest discover -v

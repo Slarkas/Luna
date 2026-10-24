@@ -8,15 +8,20 @@ DEFAULT_APP_NAME = "Luna"
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_API_TIMEOUT = 30
 
-# Provider defaults keep Luna local-first: the endpoint is a keyless,
-# OpenAI-compatible chat-completions server on this machine (LM Studio's
-# default route), and no API key is assumed or stored for it.
-DEFAULT_PROVIDER_ENDPOINT = "http://127.0.0.1:1234/v1"
+# Provider defaults keep Luna local-first: the endpoint is the user's local
+# OpenAI-compatible chat-completions server, and no API key is assumed or
+# stored for it. The endpoint can also be overridden with LUNA_PROVIDER_ENDPOINT.
+PROVIDER_ENDPOINT_ENV_VAR = "LUNA_PROVIDER_ENDPOINT"
+DEFAULT_PROVIDER_ENDPOINT = os.environ.get(
+    PROVIDER_ENDPOINT_ENV_VAR, "http://localhost:1235/v1"
+)
 
-# No model name is invented here: a local deployment chooses its own alias, so
-# the operator supplies it (env var LUNA_MODEL, otherwise the Config field).
+# Default to the model served by the configured local endpoint so Luna can
+# chat out of the box. Operators can still override it with LUNA_MODEL.
 PROVIDER_MODEL_ENV_VAR = "LUNA_MODEL"
-DEFAULT_PROVIDER_MODEL = os.environ.get(PROVIDER_MODEL_ENV_VAR, "")
+DEFAULT_PROVIDER_MODEL = os.environ.get(
+    PROVIDER_MODEL_ENV_VAR, "qwen3-zro-cdr-reason-v2-0.8b-neo3-ex-d_au-imat"
+)
 # A key is never stored or invented by Luna; it is only read from this
 # environment variable when an operator deliberately supplies one.
 PROVIDER_API_KEY_ENV_VAR = "LUNA_API_KEY"

@@ -1,26 +1,16 @@
 """LUNA — Modular Windows desktop AI assistant GUI."""
 
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QTextEdit, QStatusBar,
-    QScrollArea, QFrame,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QStatusBar,
 )
 from PySide6.QtCore import Qt
-import sys
 
 from app.agent.service import AgentService
 from app.storage.database import Database
 from app.ui.chat_history_view import ChatHistoryView
 from app.ui.chat_view import ChatView
-from app.ui.sidebar import (
-    Sidebar,
-    NAV_ACTIVE_STYLE,
-    NAV_INACTIVE_STYLE,
-    SIDEBAR_PANEL_STYLE,
-    MENU_HEADER_STYLE,
-)
-
-# Sidebar styling constants are defined in app.ui.sidebar and re-exported here.
+from app.ui.sidebar import Sidebar
 
 
 class LunaGUI(QMainWindow):
@@ -91,10 +81,6 @@ class LunaGUI(QMainWindow):
         _display_user_message(input_text, self.msg_layout)
         self._process_agent_response(input_text)
         self.input_edit.clear()
-
-    def _on_mic_clicked(self) -> None:
-        """Handle Mic button click - currently a placeholder."""
-        pass
 
     def _on_history_clicked(self) -> None:
         """Handle history button click - toggle chat history recording.
@@ -287,14 +273,12 @@ class LunaGUI(QMainWindow):
         self.nav_history_button = self.sidebar.nav_history_button
         self.nav_settings_button = self.sidebar.nav_settings_button
         self.nav_back_button = self.sidebar.nav_back_button
+        # Only the primary signals drive LunaGUI logic; the aliases exist for
+        # compatibility with external callers/tests and must not be connected
+        # here, otherwise a single click would fire the handler multiple times.
         self.sidebar.chat_history_clicked.connect(self._on_chat_history_clicked)
-        self.sidebar.chat_history_requested.connect(self._on_chat_history_clicked)
         self.sidebar.settings_clicked.connect(self._on_settings_clicked)
-        self.sidebar.settings_requested.connect(self._on_settings_clicked)
         self.sidebar.back_clicked.connect(self._on_back_clicked)
-        self.sidebar.back_requested.connect(self._on_back_clicked)
-        self.sidebar.new_chat_clicked.connect(self._on_back_clicked)
-        self.sidebar.new_chat_requested.connect(self._on_back_clicked)
         # navigation_requested is emitted for informational use; page switching
         # is handled by the dedicated handlers above.
 
