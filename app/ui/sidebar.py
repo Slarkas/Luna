@@ -79,21 +79,12 @@ class Sidebar(QFrame):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        menu_header = QLabel("Menu")
-        menu_header.setStyleSheet(
-            "QLabel {"
-            "background-color: rgba(0, 0, 0, 0.45);"
-            "color: #93c5fd;"
-            "font-size: 14px;"
-            "font-weight: bold;"
-            "padding: 10px 18px;"
-            "border-top: 1px solid rgba(0, 0, 0, 0.6);"
-            "border-left: 1px solid rgba(0, 0, 0, 0.6);"
-            "border-right: 1px solid rgba(0, 0, 0, 0.6);"
-            "border-bottom: none;"
-            "}"
-        )
-        layout.addWidget(menu_header)
+        layout.addStretch()
+
+        self.nav_new_chat_button = QPushButton("New Chat")
+        self.nav_new_chat_button.setStyleSheet(NAV_INACTIVE_STYLE)
+        self.nav_new_chat_button.clicked.connect(self._emit_new_chat)
+        layout.addWidget(self.nav_new_chat_button)
 
         self.nav_history_button = QPushButton("Chat History")
         self.nav_history_button.setStyleSheet(NAV_INACTIVE_STYLE)
@@ -114,7 +105,7 @@ class Sidebar(QFrame):
         self.history_button = self.nav_history_button
         self.settings_button = self.nav_settings_button
         self.back_button = self.nav_back_button
-        self.new_chat_button = self.nav_back_button
+        self.new_chat_button = self.nav_new_chat_button
 
     def _emit_chat_history(self) -> None:
         self.chat_history_clicked.emit()
@@ -126,11 +117,14 @@ class Sidebar(QFrame):
         self.settings_requested.emit()
         self.navigation_requested.emit("settings")
 
+    def _emit_new_chat(self) -> None:
+        self.new_chat_clicked.emit()
+        self.new_chat_requested.emit()
+        self.navigation_requested.emit("chat")
+
     def _emit_back(self) -> None:
         self.back_clicked.emit()
         self.back_requested.emit()
-        self.new_chat_clicked.emit()
-        self.new_chat_requested.emit()
         self.navigation_requested.emit("chat")
 
     def set_active(self, view: str) -> None:

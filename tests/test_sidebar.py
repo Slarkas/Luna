@@ -25,6 +25,7 @@ class TestSidebar(unittest.TestCase):
 
     def test_has_expected_navigation_options(self):
         texts = self._button_texts()
+        self.assertIn("New Chat", texts)
         self.assertIn("Chat History", texts)
         self.assertIn("Settings", texts)
         self.assertIn("Back", texts)
@@ -49,17 +50,23 @@ class TestSidebar(unittest.TestCase):
         self.assertEqual(spy_nav.size(), 1)
         self.assertEqual(spy_nav.at(0)[0], "settings")
 
-    def test_back_button_emits_new_chat_and_back_signals(self):
+    def test_back_button_emits_back_signals(self):
         spy_back = QSignalSpy(self.sidebar.back_clicked)
         spy_back_req = QSignalSpy(self.sidebar.back_requested)
-        spy_new = QSignalSpy(self.sidebar.new_chat_clicked)
-        spy_new_req = QSignalSpy(self.sidebar.new_chat_requested)
         spy_nav = QSignalSpy(self.sidebar.navigation_requested)
         self.sidebar.nav_back_button.click()
         self.assertEqual(spy_back.size(), 1)
         self.assertEqual(spy_back_req.size(), 1)
-        self.assertEqual(spy_new.size(), 1)
-        self.assertEqual(spy_new_req.size(), 1)
+        self.assertEqual(spy_nav.size(), 1)
+        self.assertEqual(spy_nav.at(0)[0], "chat")
+
+    def test_new_chat_button_emits_signals(self):
+        spy_clicked = QSignalSpy(self.sidebar.new_chat_clicked)
+        spy_requested = QSignalSpy(self.sidebar.new_chat_requested)
+        spy_nav = QSignalSpy(self.sidebar.navigation_requested)
+        self.sidebar.nav_new_chat_button.click()
+        self.assertEqual(spy_clicked.size(), 1)
+        self.assertEqual(spy_requested.size(), 1)
         self.assertEqual(spy_nav.size(), 1)
         self.assertEqual(spy_nav.at(0)[0], "chat")
 
@@ -76,7 +83,7 @@ class TestSidebar(unittest.TestCase):
         self.assertIs(self.sidebar.chat_history_button, self.sidebar.nav_history_button)
         self.assertIs(self.sidebar.settings_button, self.sidebar.nav_settings_button)
         self.assertIs(self.sidebar.back_button, self.sidebar.nav_back_button)
-        self.assertIs(self.sidebar.new_chat_button, self.sidebar.nav_back_button)
+        self.assertIs(self.sidebar.new_chat_button, self.sidebar.nav_new_chat_button)
         self.assertIs(self.sidebar.history_button, self.sidebar.nav_history_button)
 
 

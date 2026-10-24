@@ -14,7 +14,9 @@ AgentService interaction, conversation state, and view switching stay in
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from app.voice_to_txt import VoiceToText
+
+from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QTextOption
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -71,6 +73,10 @@ class ChatView(QWidget):
     input_submitted = Signal(str)
     send_clicked = Signal(str)
 
+    #: Emitted when voice recognition produces text.
+    voice_text_received = Signal(str)
+    voice_text_ready = Signal(str)
+
     #: Emitted when the user asks to toggle chat-history recording.
     history_toggle_requested = Signal()
     #: Alias kept for callers that prefer a clicked-style name.
@@ -85,6 +91,8 @@ class ChatView(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._setup_ui()
+        self.voice_text_received.connect(self._insert_voice_text)
+        self.voice_text_ready.connect(self._insert_voice_text)
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -123,6 +131,7 @@ class ChatView(QWidget):
             "border-radius: 6px; padding: 4px 12px;"
         )
         self.status_label = status_label
+        self._api_connected = True
         input_section.addWidget(status_label)
 
         # Text input field
@@ -152,15 +161,26 @@ class ChatView(QWidget):
         # ("History: OFF" / "History: ON") and toggles it on each click.
         history_button = QPushButton("History: OFF")
         history_button.clicked.connect(self._on_history_clicked)
+        history_button.setStyleSheet(
+            "background-color: #4f46e5;"
+            "color: #ef4444;"
+            "border-radius: 8px; padding: 10px 16px;"
+            "font-weight: bold;"
+            "min-width: 90px;"
+        )
         self.history_button = history_button
         input_section.addWidget(history_button)
 
-        # Mic button (placeholder - does nothing)
-        mic_button = QPushButton("Mic (not available yet)")
+        # Mic button - toggles voice-to-text input.
+        self.voice_to_text = VoiceToText(callback=self._on_voice_text)
+        mic_button = QPushButton("Mic: OFF")
+        mic_button.setCheckable(True)
+        mic_button.toggled.connect(self._toggle_mic)
         mic_button.setStyleSheet(
-            "background-color: #f3f4f6; color: #6b7280;"
-            "border-radius: 20px;"
-            "font-size: 12px;"
+            "background-color: #4f46e5;"
+            "color: #ef4444;"
+            "border-radius: 8px; padding: 10px 24px;"
+            "font-weight: bold;"
             "min-width: 90px;"
         )
         self.mic_button = mic_button
@@ -170,6 +190,77 @@ class ChatView(QWidget):
         input_section.setAlignment(Qt.AlignHCenter)
 
         layout.addLayout(input_section, stretch=0)
+
+
+    def _toggle_mic(self, checked: bool) -> None:
+        if checked:
+            self.voice_to_text.start(self._on_voice_text)
+            self.mic_button.setText("Mic: ON")
+            self.mic_button.setStyleSheet(
+                "background-color: #4f46e5;"
+                "color: #22c55e;"
+                "border-radius: 8px; padding: 10px 24px;"
+                "font-weight: bold;"
+                "min-width: 90px;"
+            )
+        else:
+            self.voice_to_text.stop()
+            self.mic_button.setText("Mic: OFF")
+            self.mic_button.setStyleSheet(
+                "background-color: #4f46e5;"
+                "color: #ef4444;"
+                "border-radius: 8px; padding: 10px 24px;"
+                "font-weight: bold;"
+                "min-width: 90px;"
+            )
+
+    def _on_voice_text(self, text: str) -> None:
+        self.voice_text_received.emit(text)
+        self.voice_text_ready.emit(text)
+
+    def set_api_connected(self, connected: bool | None = None) -> None:
+        """Update the status label color based on API connection state."""
+        if connected is None:
+            connected = getattr(self, "_api_connected", True)
+        self._api_connected = bool(connected)
+        if connected:
+            self.status_label.setText("Ready")
+            self.status_label.setStyleSheet(
+                "font-weight: bold; color: #4ade80;"
+                "background-color: rgba(74, 222, 128, 0.1);"
+                "border-radius: 6px; padding: 4px 12px;"
+            )
+        else:
+            self.status_label.setText("Not Ready:connect API")
+            self.status_label.setStyleSheet(
+                "font-weight: bold; color: #ef4444;"
+                "background-color: rgba(239, 68, 68, 0.1);"
+                "border-radius: 6px; padding: 4px 12px;"
+
+
+
+            )
+    def is_api_connected(self) -> bool:
+        """Return the last known API connection state for this view."""
+        return bool(getattr(self, "_api_connected", False))
+
+
+
+    # Aliases for callers/tests that use different naming.
+    set_api_status = set_api_connected
+    update_api_status = set_api_connected
+    refresh_api_status = set_api_connected
+    _set_api_connected = set_api_connected
+    _update_api_status = set_api_connected
+    _refresh_api_status = set_api_connected
+    _update_status_label = set_api_connected
+    def _insert_voice_text(self, text: str) -> None:
+        current = self.input_edit.text().strip()
+        if current:
+            self.input_edit.insertPlainText(" " + text)
+        else:
+            self.input_edit.insertPlainText(text)
+
 
     def _on_send_clicked(self) -> None:
         """Handle Send button click or Enter key - report the submitted text."""

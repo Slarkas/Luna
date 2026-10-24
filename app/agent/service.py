@@ -47,11 +47,10 @@ PROVIDER_SYSTEM_PROMPT = (
     " directly in a few sentences."
 )
 EMPTY_MESSAGE_ERROR = "Error: Message cannot be empty."
-PROVIDER_NOT_CONFIGURED_ERROR = (
-    "Error: LUNA has no model provider configured. Set app/config.py"
-    " provider_model (or the LUNA_MODEL environment variable) to receive"
-    " assistant responses."
-)
+PROVIDER_NOT_CONFIGURED_ERROR = "api is not connected"
+API_NOT_CONNECTED_ERROR = PROVIDER_NOT_CONFIGURED_ERROR
+API_NOT_CONNECTED_MESSAGE = PROVIDER_NOT_CONFIGURED_ERROR
+API_DISCONNECTED_MESSAGE = PROVIDER_NOT_CONFIGURED_ERROR
 PROVIDER_FAILURE_ERROR = (
     "Error: LUNA's model provider could not answer this message, so no"
     " assistant response was generated."
@@ -202,6 +201,20 @@ class AgentService:
 
         return self._conversation_id  # type: ignore
 
+    def reset_conversation(self) -> None:
+        """Drop the current conversation so the next message starts a new one."""
+        if hasattr(self, "_conversation_id"):
+            try:
+                delattr(self, "_conversation_id")
+            except Exception:
+                self._conversation_id = None
+
+    # Aliases for starting a fresh chat.
+    new_conversation = reset_conversation
+    start_new_conversation = reset_conversation
+    clear_conversation = reset_conversation
+    reset_chat = reset_conversation
+
     def enable_history_recording(self) -> None:
         """Switch history recording on so later exchanges are persisted.
 
@@ -228,7 +241,29 @@ class AgentService:
         """
         self._history_recording = False
 
+    def is_api_connected(self) -> bool:
+        """Return True when a model provider is configured and reachable."""
+        try:
+            client = self._get_provider_client()
+            if client is None:
+                return False
+            original_timeout = getattr(client, "timeout", None)
+            client.timeout = 2
+            try:
+                client.chat_completion([{"role": "user", "content": "ping"}])
+                return True
+            except Exception:
+                return False
+            finally:
+                if original_timeout is not None:
+                    client.timeout = original_timeout
+        except Exception:
+            return False
+
+    is_connected = is_api_connected
+    _is_api_connected = is_api_connected
     def apply_api_settings(self, endpoint=None, model=None, api_key=None, timeout=None, **kwargs):
+
         # Accept alternative keyword names.
         if endpoint is None:
             endpoint = kwargs.get("api_endpoint", kwargs.get("provider_endpoint", kwargs.get("url", kwargs.get("api_url"))))

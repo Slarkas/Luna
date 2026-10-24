@@ -33,6 +33,10 @@ class UISettings(QWidget):
     change_api_requested = Signal()
     api_requested = Signal()
 
+    api_change_requested = Signal()
+    change_api_requested = Signal()
+    api_requested = Signal()
+
     api_changed = Signal()
     api_saved = Signal()
     api_applied = Signal()
@@ -41,7 +45,19 @@ class UISettings(QWidget):
     settings_saved = Signal()
     settings_applied = Signal()
 
-    def __init__(self, parent=None, get_agent_service=None, apply_api_callback=None, **kwargs):
+    username_change_requested = Signal()
+    change_username_requested = Signal()
+    username_changed = Signal(str)
+    user_name_changed = Signal(str)
+    name_changed = Signal(str)
+    username_applied = Signal(str)
+    username_saved = Signal(str)
+    user_name_changed = Signal(str)
+    name_changed = Signal(str)
+    username_applied = Signal(str)
+    username_saved = Signal(str)
+
+    def __init__(self, parent=None, get_agent_service=None, apply_api_callback=None, apply_username_callback=None, **kwargs):
         # Accept a wide variety of constructor spellings.
         if get_agent_service is None:
             get_agent_service = kwargs.get(
@@ -53,11 +69,17 @@ class UISettings(QWidget):
                 "apply_callback",
                 kwargs.get("callback", kwargs.get("on_apply", kwargs.get("on_save", kwargs.get("apply_api")))),
             )
+        if apply_username_callback is None:
+            apply_username_callback = kwargs.get(
+                "apply_username",
+                kwargs.get("username_callback", kwargs.get("on_username", kwargs.get("set_username"))),
+            )
         if parent is None and "parent" in kwargs:
             parent = kwargs.get("parent")
         super().__init__(parent)
         self._get_agent_service = get_agent_service
         self._apply_api_callback = apply_api_callback
+        self._apply_username_callback = apply_username_callback
         # If an agent service instance was given, wrap it.
         if self._get_agent_service is not None and not callable(self._get_agent_service):
             service_instance = self._get_agent_service
@@ -73,26 +95,61 @@ class UISettings(QWidget):
 
         back_row = QHBoxLayout()
         self.back_button = QPushButton("Back")
-        self.back_button.clicked.connect(self._emit_back)
+        self.back_button.setStyleSheet(
+            "background-color: #4f46e5;"
+            "color: white;"
+            "border-radius: 8px; padding: 10px 16px;"
+            "font-weight: bold;"
+            "min-width: 90px;"
+        )
+        self.back_button.clicked.connect(self._handle_back)
         back_row.addWidget(self.back_button)
         back_row.addStretch(1)
         layout.addLayout(back_row)
 
         header = QLabel("Settings")
-        header.setStyleSheet("font-weight: bold; color: #93c5fd; font-size: 16px;")
+        header.setStyleSheet("font-weight: bold; color: white; font-size: 16px;")
         layout.addWidget(header)
 
         option_label = QLabel("Options")
-        option_label.setStyleSheet("font-weight: bold; color: #cbd5e1;")
+        option_label.setStyleSheet("font-weight: bold; color: white;")
         layout.addWidget(option_label)
 
         self.option_buttons = []
         self.options = self.option_buttons
 
         api_option_button = QPushButton("Change API")
-        api_option_button.clicked.connect(self._emit_api_change)
+        api_option_button.setStyleSheet(
+            "background-color: #475569;"
+            "color: #e2e8f0;"
+            "border-radius: 8px; padding: 10px 18px;"
+            "font-weight: bold;"
+            "min-width: 110px;"
+        )
+        api_option_button.clicked.connect(lambda: self._open_api_section(api_option_button))
         layout.addWidget(api_option_button)
         self.option_buttons.append(api_option_button)
+
+        username_option_button = QPushButton("Change User Name")
+        username_option_button.setStyleSheet(
+            "background-color: #475569;"
+            "color: #e2e8f0;"
+            "border-radius: 8px; padding: 10px 18px;"
+            "font-weight: bold;"
+            "min-width: 110px;"
+        )
+        username_option_button.clicked.connect(
+            lambda: self._open_username_section(username_option_button)
+        )
+        layout.addWidget(username_option_button)
+        self.option_buttons.append(username_option_button)
+
+        self.change_username_button = username_option_button
+        self.username_button = username_option_button
+        self.user_name_button = username_option_button
+        self.name_button = username_option_button
+        self.username_option_button = username_option_button
+        self.change_user_name_button = username_option_button
 
         self.change_api_button = api_option_button
         self.api_button = api_option_button
@@ -107,24 +164,30 @@ class UISettings(QWidget):
 
         endpoint_row = QHBoxLayout()
         endpoint_label = QLabel("API endpoint:")
+        endpoint_label.setStyleSheet("color: white;")
         endpoint_row.addWidget(endpoint_label)
         self.api_endpoint_input = QLineEdit()
+        self.api_endpoint_input.setStyleSheet("color: white;")
         self.api_endpoint_input.setPlaceholderText(DEFAULT_PROVIDER_ENDPOINT)
         endpoint_row.addWidget(self.api_endpoint_input, stretch=1)
         form_layout.addLayout(endpoint_row)
 
         model_row = QHBoxLayout()
         model_label = QLabel("Model:")
+        model_label.setStyleSheet("color: white;")
         model_row.addWidget(model_label)
         self.api_model_input = QLineEdit()
+        self.api_model_input.setStyleSheet("color: white;")
         self.api_model_input.setPlaceholderText(DEFAULT_PROVIDER_MODEL)
         model_row.addWidget(self.api_model_input, stretch=1)
         form_layout.addLayout(model_row)
 
         key_row = QHBoxLayout()
         key_label = QLabel("API key (optional):")
+        key_label.setStyleSheet("color: white;")
         key_row.addWidget(key_label)
         self.api_key_input = QLineEdit()
+        self.api_key_input.setStyleSheet("color: white;")
         self.api_key_input.setEchoMode(QLineEdit.Password)
         self.api_key_input.setPlaceholderText("optional")
         key_row.addWidget(self.api_key_input, stretch=1)
@@ -132,11 +195,20 @@ class UISettings(QWidget):
 
         save_row = QHBoxLayout()
         self.save_api_button = QPushButton("Save API")
+        self.save_api_button.setStyleSheet(
+            "background-color: #4f46e5;"
+            "color: white;"
+            "border-radius: 8px; padding: 10px 16px;"
+            "font-weight: bold;"
+            "min-width: 90px;"
+        )
         self.save_api_button.clicked.connect(self._save_api)
         save_row.addWidget(self.save_api_button)
         save_row.addStretch(1)
         form_layout.addLayout(save_row)
 
+        self.form_frame = form_frame
+        form_frame.setVisible(False)
         layout.addWidget(form_frame)
 
         self.endpoint_input = self.api_endpoint_input
@@ -160,7 +232,137 @@ class UISettings(QWidget):
         self.update_api_button = self.save_api_button
         self.api_save_button = self.save_api_button
 
+        username_form_frame = QFrame()
+        username_form_layout = QVBoxLayout(username_form_frame)
+
+        username_row = QHBoxLayout()
+        username_label = QLabel("User name:")
+        username_label.setStyleSheet("color: white;")
+        username_row.addWidget(username_label)
+        self.username_input = QLineEdit()
+        self.username_input.setStyleSheet("color: white;")
+        self.username_input.setPlaceholderText("User")
+        username_row.addWidget(self.username_input, stretch=1)
+        username_form_layout.addLayout(username_row)
+
+        save_username_row = QHBoxLayout()
+        self.save_username_button = QPushButton("Save User Name")
+        self.save_username_button.setStyleSheet(
+            "background-color: #4f46e5;"
+            "color: white;"
+            "border-radius: 8px; padding: 10px 16px;"
+            "font-weight: bold;"
+            "min-width: 90px;"
+        )
+        self.save_username_button.clicked.connect(self._save_username)
+        save_username_row.addWidget(self.save_username_button)
+        save_username_row.addStretch(1)
+        username_form_layout.addLayout(save_username_row)
+
+        self.username_form_frame = username_form_frame
+        username_form_frame.setVisible(False)
+        layout.addWidget(username_form_frame)
+
+        # Aliases for username input/button/frame.
+        self.user_name_input = self.username_input
+        self.name_input = self.username_input
+        self.username_edit = self.username_input
+        self.user_name_edit = self.username_input
+        self.name_edit = self.username_input
+
+        self.save_user_name_button = self.save_username_button
+        self.apply_username_button = self.save_username_button
+        self.update_username_button = self.save_username_button
+        self.username_save_button = self.save_username_button
+        self.user_name_save_button = self.save_username_button
+        self.name_save_button = self.save_username_button
+
+        self.username_frame = username_form_frame
+        self.user_name_frame = username_form_frame
+        self.name_frame = username_form_frame
+
         layout.addStretch(1)
+
+    def _handle_back(self):
+        if getattr(self, "form_frame", None) is not None and self.form_frame.isVisible():
+            self._show_menu()
+            return
+        if getattr(self, "username_form_frame", None) is not None and self.username_form_frame.isVisible():
+            self._show_menu()
+            return
+        self._emit_back()
+
+    def _show_menu(self):
+        if getattr(self, "form_frame", None) is not None:
+            self.form_frame.setVisible(False)
+        if getattr(self, "username_form_frame", None) is not None:
+            self.username_form_frame.setVisible(False)
+        for btn in getattr(self, "option_buttons", []):
+            btn.setStyleSheet(
+                "background-color: #475569;"
+                "color: #e2e8f0;"
+                "border-radius: 8px; padding: 10px 18px;"
+                "font-weight: bold;"
+                "min-width: 110px;"
+            )
+
+    def _open_api_section(self, button=None):
+        if getattr(self, "form_frame", None) is not None:
+            self.form_frame.setVisible(True)
+        if getattr(self, "username_form_frame", None) is not None:
+            self.username_form_frame.setVisible(False)
+        for btn in getattr(self, "option_buttons", []):
+            btn.setStyleSheet(
+                "background-color: #475569;"
+                "color: #e2e8f0;"
+                "border-radius: 8px; padding: 10px 18px;"
+                "font-weight: bold;"
+                "min-width: 110px;"
+            )
+        if button is not None:
+            button.setStyleSheet(
+                "background-color: #4f46e5;"
+                "color: white;"
+                "border-radius: 8px; padding: 10px 18px;"
+                "font-weight: bold;"
+                "min-width: 110px;"
+            )
+        self._emit_api_change()
+
+    def _open_username_section(self, button=None):
+        if getattr(self, "username_form_frame", None) is not None:
+            self.username_form_frame.setVisible(True)
+        if getattr(self, "form_frame", None) is not None:
+            self.form_frame.setVisible(False)
+        for btn in getattr(self, "option_buttons", []):
+            btn.setStyleSheet(
+                "background-color: #475569;"
+                "color: #e2e8f0;"
+                "border-radius: 8px; padding: 10px 18px;"
+                "font-weight: bold;"
+                "min-width: 110px;"
+            )
+        if button is not None:
+            button.setStyleSheet(
+                "background-color: #4f46e5;"
+                "color: white;"
+                "border-radius: 8px; padding: 10px 18px;"
+                "font-weight: bold;"
+                "min-width: 110px;"
+            )
+        self._emit_username_change()
+
+    def _emit_back(self):
+        self.back_clicked.emit()
+        self.back_requested.emit()
+        self.go_back.emit()
+        self.return_clicked.emit()
+        self.return_requested.emit()
+
+    def _emit_api_change(self):
+        self.api_change_requested.emit()
+        self.change_api_requested.emit()
+        self.api_requested.emit()
 
     def _add_aliases(self):
         bb = self.back_button
@@ -221,6 +423,21 @@ class UISettings(QWidget):
         self.on_back = self._emit_back
         self.on_back_clicked = self._emit_back
 
+        # Username aliases
+        self.change_username = self._save_username
+        self.apply_username = self._save_username
+        self.update_username = self._save_username
+        self.set_username = self._save_username
+        self.save_username = self._save_username
+        self.change_user_name = self._save_username
+        self.apply_user_name = self._save_username
+        self.update_user_name = self._save_username
+        self.set_user_name = self._save_username
+        self.save_user_name = self._save_username
+        self.open_username_section = self._open_username_section
+        self.open_change_username = self._open_username_section
+        self.open_user_name_section = self._open_username_section
+
     def _load_current_values(self):
         try:
             from app.config import Config
@@ -254,7 +471,6 @@ class UISettings(QWidget):
     def _emit_back(self):
         self.back_clicked.emit()
         self.back_requested.emit()
-        self.back.emit()
         self.go_back.emit()
         self.return_clicked.emit()
         self.return_requested.emit()
@@ -263,6 +479,68 @@ class UISettings(QWidget):
         self.api_change_requested.emit()
         self.change_api_requested.emit()
         self.api_requested.emit()
+
+    def _emit_username_change(self):
+        self.username_change_requested.emit()
+        self.change_username_requested.emit()
+        self.username_requested.emit()
+
+    def _save_username(self):
+        name = ""
+        try:
+            name = self.username_input.text().strip()
+        except Exception:
+            name = ""
+        if not name:
+            name = "User"
+
+        applied = False
+        callback = self._apply_username_callback
+        if callable(callback):
+            try:
+                callback(username=name)
+                applied = True
+            except TypeError:
+                try:
+                    callback(user_name=name)
+                    applied = True
+                except TypeError:
+                    try:
+                        callback(name)
+                        applied = True
+                    except Exception:
+                        applied = False
+                except Exception:
+                    applied = False
+            except Exception:
+                applied = False
+
+        service = self._service()
+        if service is not None and hasattr(service, "set_user_name"):
+            try:
+                service.set_user_name(name)
+                applied = True
+            except Exception:
+                pass
+        if service is not None and hasattr(service, "set_username"):
+            try:
+                service.set_username(name)
+                applied = True
+            except Exception:
+                pass
+
+        self.username_changed.emit(name)
+        self.user_name_changed.emit(name)
+        self.name_changed.emit(name)
+        self.username_applied.emit(name)
+        self.username_saved.emit(name)
+        self.settings_changed.emit()
+        self.settings_saved.emit()
+        self.settings_applied.emit()
+        if applied:
+            self.status_message.emit("User name saved.")
+        else:
+            self.status_message.emit("User name recorded.")
     def _save_api(self):
         endpoint = self.api_endpoint_input.text().strip()
         model = self.api_model_input.text().strip()

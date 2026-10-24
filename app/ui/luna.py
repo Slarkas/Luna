@@ -23,6 +23,10 @@ WINDOW_BACKGROUND_IMAGE = os.path.join(
 
 
 
+USER_NAME = "User"
+CURRENT_GUI = None
+
+
 class LunaGUI(QMainWindow):
     """Main GUI window for the LUNA application."""
 
@@ -43,6 +47,11 @@ class LunaGUI(QMainWindow):
         self._current_view: str = "chat"
 
         self._setup_ui()
+        self._message_queue = []
+        self._processing_message = False
+        self.user_name = "User"
+        global CURRENT_GUI
+        CURRENT_GUI = self
 
     def _apply_initial_window_size(self) -> None:
         """Open the window at roughly twice the minimum layout size.
@@ -52,23 +61,7 @@ class LunaGUI(QMainWindow):
         display. Only the initial size is set - the window keeps its default
         resizable behaviour between that minimum and the screen limit.
         """
-        minimum_width = self.minimumSize().width()
-        minimum_height = self.minimumSize().height()
-
-        initial_width = minimum_width * 2
-        initial_height = minimum_height * 2
-
-        screen = self.screen()
-        if screen is not None:
-            available = screen.availableSize()
-            if available.width() > 0 and available.height() > 0:
-                initial_width = min(initial_width, available.width())
-                initial_height = min(initial_height, available.height())
-
-        self.resize(
-            max(initial_width, minimum_width),
-            max(initial_height, minimum_height),
-        )
+        self.resize(1620, 860)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -107,9 +100,13 @@ class LunaGUI(QMainWindow):
         # never the menu structure or the history recording state.
         self._set_current_view("chat")
 
-        _display_user_message(input_text, self.msg_layout)
-        self._process_agent_response(input_text)
+        _display_user_message(input_text, self.msg_layout, username=self.user_name)
         self.input_edit.clear()
+
+        # Queue the message so several submissions can be written one after
+        # another without waiting; they are processed strictly in order.
+        self._message_queue.append(input_text)
+        self._ensure_processing()
 
     def _on_history_clicked(self) -> None:
         """Handle history button click - toggle chat history recording.
@@ -132,8 +129,8 @@ class LunaGUI(QMainWindow):
         if self._history_recording:
             self.history_button.setText("History: ON")
             self.history_button.setStyleSheet(
-                "background-color: #10b981;"
-                "color: white;"
+                "background-color: #4f46e5;"
+                "color: #22c55e;"
                 "border-radius: 8px; padding: 10px 16px;"
                 "font-weight: bold;"
                 "min-width: 90px;"
@@ -141,8 +138,8 @@ class LunaGUI(QMainWindow):
         else:
             self.history_button.setText("History: OFF")
             self.history_button.setStyleSheet(
-                "background-color: #64748b;"
-                "color: white;"
+                "background-color: #4f46e5;"
+                "color: #ef4444;"
                 "border-radius: 8px; padding: 10px 16px;"
                 "font-weight: bold;"
                 "min-width: 90px;"
@@ -172,17 +169,160 @@ class LunaGUI(QMainWindow):
         self._set_current_view("settings")
         self.status_bar.showMessage("Settings opened.")
 
+    def _is_api_connected(self) -> bool:
+        try:
+            return AgentService().is_api_connected()
+        except Exception:
+            return False
+    def _ensure_processing(self) -> None:
+        """Start processing queued messages if nothing is running."""
+        if self._processing_message:
+            return
+        if not self._message_queue:
+            return
+        self._processing_message = True
+        self._process_next_queued()
+
+    def _process_next_queued(self) -> None:
+        """Process the next queued message, then continue with the rest."""
+        if not self._message_queue:
+            self._processing_message = False
+            return
+
+        message = self._message_queue.pop(0)
+
+        import threading
+
+        from PySide6.QtCore import QTimer
+
+        result = {"value": None, "error": None}
+
+        def worker() -> None:
+            try:
+                result["value"] = AgentService().process_message(message)
+            except Exception as exc:  # noqa: BLE001
+                result["error"] = exc
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
+        def poll() -> None:
+            if thread.is_alive():
+                QTimer.singleShot(10, poll)
+            else:
+                if result["error"] is not None:
+                    exc = result["error"]
+                    name = type(exc).__name__
+                    text = str(exc).lower()
+                    if "could not be reached" in text or "connection" in name.lower() or "providerconnection" in name.lower():
+                        response = "api is not connected"
+                        try:
+                            self.chat_view.set_api_connected(False)
+                        except Exception:
+                            pass
+                    else:
+                        response = "An internal error occurred while processing your message."
+                else:
+                    response = result["value"]
+                    try:
+                        self.chat_view.set_api_connected(True)
+                    except Exception:
+                        pass
+                _display_agent_message(response, self.msg_layout)
+                QTimer.singleShot(0, self._process_next_queued)
+
+        QTimer.singleShot(10, poll)
+
+    _update_api_status = _is_api_connected
+    _refresh_api_status = _is_api_connected
+    update_api_status = _is_api_connected
+    refresh_api_status = _is_api_connected
+    set_api_connected = lambda self, connected=None: self.chat_view.set_api_connected(
+        self._is_api_connected() if connected is None else bool(connected)
+    )
+    set_api_status = set_api_connected
+    is_api_connected = _is_api_connected
+
     def _on_api_settings_applied(self, **kwargs) -> None:
         try:
             AgentService().apply_api_settings(**kwargs)
         except Exception:  # noqa: S110
             pass
+        if hasattr(self, "chat_view") and hasattr(self.chat_view, "set_api_connected"):
+            try:
+                self.chat_view.set_api_connected(self._is_api_connected())
+            except Exception:
+                pass
+        self.status_bar.showMessage("API settings updated.")
         self.status_bar.showMessage("API settings updated.")
 
+    def _on_username_settings_applied(self, *args, **kwargs) -> None:
+        name = None
+        if args:
+            if isinstance(args[0], str):
+                name = args[0]
+        for key in ("username", "user_name", "name"):
+            if name is None and key in kwargs and kwargs[key] is not None:
+                name = kwargs[key]
+        if name is None and kwargs:
+            # Last resort: first value.
+            try:
+                name = next(iter(kwargs.values()))
+            except Exception:
+                name = None
+        name = str(name).strip() if name is not None else ""
+        if not name:
+            name = self.user_name or "User"
+        self.user_name = name
+        global USER_NAME
+        USER_NAME = name
+        self.status_bar.showMessage("User name updated.")
+
+    def _on_username_changed(self, *args, **kwargs) -> None:
+        name = None
+        if args:
+            if isinstance(args[0], str):
+                name = args[0]
+            else:
+                try:
+                    name = str(args[0])
+                except Exception:
+                    name = None
+        for key in ("username", "user_name", "name"):
+            if name is None and key in kwargs and kwargs[key] is not None:
+                name = kwargs[key]
+        if name is None and not args and kwargs:
+            try:
+                name = next(iter(kwargs.values()))
+            except Exception:
+                name = None
+        name = str(name).strip() if name is not None else ""
+        if not name:
+            return
+        self.user_name = name
+        global USER_NAME
+        USER_NAME = name
+
+    def _on_new_chat_clicked(self) -> None:
+        """Start a fresh chat: clear the chat area and reset conversation state."""
+        self._set_current_view("chat")
+        self._clear_chat_area()
+        try:
+            AgentService().reset_conversation()
+        except Exception:
+            pass
+        self.status_bar.showMessage("New chat started.")
+
+    # Aliases for alternative naming.
+    _start_new_chat = _on_new_chat_clicked
+    _new_chat = _on_new_chat_clicked
+    start_new_chat = _on_new_chat_clicked
+    new_chat = _on_new_chat_clicked
     def _on_back_clicked(self) -> None:
         """Leave the open section and return to the main chat page."""
         self._set_current_view("chat")
         self.status_bar.showMessage("Back on the main chat page.")
+
 
     def _set_current_view(self, view: str) -> None:
         """Show one content section at a time and mark its menu option active."""
@@ -241,7 +381,7 @@ class LunaGUI(QMainWindow):
         for message in messages:
             content = str(message.get("content", ""))
             if message.get("role") == "user":
-                _display_user_message(content, self.msg_layout)
+                _display_user_message(content, self.msg_layout, username=self.user_name)
             else:
                 _display_agent_message(content, self.msg_layout)
 
@@ -268,8 +408,39 @@ class LunaGUI(QMainWindow):
 
     def _process_agent_response(self, message: str) -> None:
         """Process the agent's response and display it in the conversation."""
-        service = AgentService()
-        response = service.process_message(message)
+        if not self._is_api_connected():
+            _display_agent_message("api is not connected", self.msg_layout)
+            return
+        import threading
+
+        from PySide6.QtCore import QEventLoop, QTimer
+
+        result = {"value": None, "error": None}
+
+        def worker() -> None:
+            try:
+                result["value"] = AgentService().process_message(message)
+            except Exception as exc:  # noqa: BLE001
+                result["error"] = exc
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
+        loop = QEventLoop()
+
+        def poll() -> None:
+            if thread.is_alive():
+                QTimer.singleShot(10, poll)
+            else:
+                loop.quit()
+
+        QTimer.singleShot(10, poll)
+        loop.exec()
+
+        if result["error"] is not None:
+            response = "An internal error occurred while processing your message."
+        else:
+            response = result["value"]
         _display_agent_message(response, self.msg_layout)
 
     def _setup_ui(self) -> None:
@@ -312,16 +483,18 @@ class LunaGUI(QMainWindow):
         self.nav_history_button = self.sidebar.nav_history_button
         self.nav_settings_button = self.sidebar.nav_settings_button
         self.nav_back_button = self.sidebar.nav_back_button
+        self.nav_new_chat_button = self.sidebar.nav_new_chat_button
         self.settings_button = self.nav_settings_button
         self.history_button = self.nav_history_button
         self.back_button = self.nav_back_button
-        self.new_chat_button = self.nav_back_button
+        self.new_chat_button = self.nav_new_chat_button
         # Only the primary signals drive LunaGUI logic; the aliases exist for
         # compatibility with external callers/tests and must not be connected
         # here, otherwise a single click would fire the handler multiple times.
         self.sidebar.chat_history_clicked.connect(self._on_chat_history_clicked)
         self.sidebar.settings_clicked.connect(self._on_settings_clicked)
         self.sidebar.back_clicked.connect(self._on_back_clicked)
+        self.sidebar.new_chat_clicked.connect(self._on_new_chat_clicked)
         # navigation_requested is emitted for informational use; page switching
         # is handled by the dedicated handlers above.
 
@@ -351,6 +524,10 @@ class LunaGUI(QMainWindow):
         self.send_button = self.chat_view.send_button
         self.history_button = self.chat_view.history_button
         self.status_label = self.chat_view.status_label
+        try:
+            self.chat_view.set_api_connected(self._is_api_connected())
+        except Exception:
+            pass
 
         # Only the primary signals drive LunaGUI logic; the aliases exist for
         # compatibility with external callers/tests and must not be connected
@@ -385,6 +562,7 @@ class LunaGUI(QMainWindow):
         self.settings_view = UISettings(
             get_agent_service=AgentService,
             apply_api_callback=self._on_api_settings_applied,
+            apply_username_callback=self._on_username_settings_applied,
         )
         self.settings_view.setStyleSheet("background: transparent;")
         self.settings = self.settings_view
@@ -395,6 +573,19 @@ class LunaGUI(QMainWindow):
             self.settings_view.back_requested.connect(self._on_back_clicked)
         if hasattr(self.settings_view, "status_message"):
             self.settings_view.status_message.connect(self.status_bar.showMessage)
+        for signal_name in (
+            "username_changed",
+            "user_name_changed",
+            "name_changed",
+            "username_applied",
+            "username_saved",
+        ):
+            signal = getattr(self.settings_view, signal_name, None)
+            if signal is not None:
+                try:
+                    signal.connect(self._on_username_changed)
+                except Exception:
+                    pass
 
         # Both sections are inserted above the input row so an opened section
         # becomes the page's focus area while the input row stays where the main
@@ -417,9 +608,18 @@ class LunaGUI(QMainWindow):
         self._refresh_navigation_buttons()
 
 
-def _display_user_message(text: str, msg_layout: QVBoxLayout) -> None:
+def _display_user_message(text: str, msg_layout: QVBoxLayout, username: str | None = None) -> None:
     """Display a user message in the conversation area."""
-    msg_label = QLabel(f"User:\n{text}")
+    if username is None:
+        try:
+            gui = CURRENT_GUI
+            if gui is not None and getattr(gui, "user_name", None):
+                username = gui.user_name
+        except Exception:
+            username = None
+    if username is None:
+        username = USER_NAME
+    msg_label = QLabel(f"{username}:\n{text}")
 
     msg_label.setWordWrap(True)
     msg_style = (
