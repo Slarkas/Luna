@@ -41,7 +41,7 @@ class TestTTSService(unittest.TestCase):
         self.assertIsInstance(audio, bytes)
         self.assertTrue(audio.startswith(b"RIFF"))
         self.assertIn(b"WAVE", audio[:12])
-        mock_tts.from_pretrained.assert_called_once_with(device="cpu")
+        mock_tts.from_pretrained.assert_called_once_with(device="cuda")
         mock_model.generate.assert_called_once()
         _, kwargs = mock_model.generate.call_args
         self.assertIsNone(kwargs.get("audio_prompt_path"))
@@ -141,6 +141,18 @@ class TestTTSService(unittest.TestCase):
                 self.svc.synthesize("Hello")
         engine = self.svc._engines["chatterbox-nano"]
         self.assertFalse(engine.is_nano)
+
+    def test_cpu_fallback_when_cuda_unavailable(self):
+        """When CUDA is not available, CPU is used for model loading."""
+        with patch("torch.cuda.is_available", return_value=False):
+            with patch("app.tts_service.ChatterboxTurboTTS") as mock_tts:
+                mock_model = MagicMock()
+                mock_model.sr = 24000
+                mock_model.generate.return_value = _fake_wav()
+                mock_tts.from_pretrained.return_value = mock_model
+                audio = self.svc.synthesize("Hello world")
+            self.assertIsInstance(audio, bytes)
+            mock_tts.from_pretrained.assert_called_once_with(device="cpu")
         engine = self.svc._engines["chatterbox-nano"]
         self.assertFalse(engine.is_nano)
 

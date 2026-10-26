@@ -393,5 +393,118 @@ class TestProviderTransport(unittest.TestCase):
         self.assertNotIn("failed", message)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestProviderExtractContent(unittest.TestCase):
+    """Tests for ``ProviderClient._extract_content`` - reasoning block stripping."""
+
+    def _payload(self, content: str, reasoning: str | None = None) -> bytes:
+        """Build a chat-completion JSON body with *content* as assistant text and
+        optional *reasoning* in a ``reasoning_content`` field (which the extractor
+        must ignore)."""
+        obj = {
+            "id": "stub-id",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "whatever",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": content},
+                }
+            ],
+        }
+        if reasoning is not None:
+            obj["choices"][0]["message"]["reasoning_content"] = reasoning
+        return json.dumps(obj).encode("utf-8")
+
+    def test_complete_pause_block_is_stripped(self) -> None:
+        """Complete ``<pause>...</pause>`` blocks are removed, surrounding text preserved."""
+        body = self._payload(
+            "Hello there.<pause>Let me think.</pause>How are you?",
+            reasoning="internal thought",
+        )
+        client = ProviderClient("https://api.example.test/v1", "some-model")
+        stub = _UrlopenStub(body=body)
+        with patch("app.agent.provider.urlopen", stub):
+            result = client._extract_content(body)  # type: ignore[attr-defined]
+        self.assertEqual(result, "Hello there.How are you?")
+
+    def test_unclosed_pause_block_is_handled(self) -> None:
+        """An unclosed ``<pause`` (no matching ``</pause>``) strips from ``<pause`` to end."""
+        body = self._payload(
+            "Hello there.<pause>Let me think",
+            reasoning="internal thought",
+        )
+        client = ProviderClient("https://api.example.test/v1", "some-model")
+        stub = _UrlopenStub(body=body)
+        with patch("app.agent.provider.urlopen", stub):
+            result = client._extract_content(body)  # type: ignore[attr-defined]
+        # The unclosed <pause> block and its content are removed; only leading text remains.
+        self.assertEqual(result, "Hello there.")
+
+    def test_reasoning_content_field_is_ignored(self) -> None:
+        """The ``reasoning_content`` field is never concatenated; only ``message.content`` is used."""
+        body = self._payload(
+            "Final answer.",
+            reasoning="<pause>thinking process</pause>actual reasoning",
+        )
+        client = ProviderClient("https://api.example.test/v1", "some-model")
+        stub = _UrlopenStub(body=body)
+        with patch("app.agent.provider.urlopen", stub):
+            result = client._extract_content(body)  # type: ignore[attr-defined]
+        self.assertEqual(result, "Final answer.")
+        # Ensure reasoning_content text did not leak into the result
+        self.assertNotIn("thinking", result.lower())
+
+    def test_normal_text_passes_unchanged(self) -> None:
+        """Ordinary assistant text, including the word 'thinking', passes through unchanged."""
+        body = self._payload("I was thinking about that.")
+        client = ProviderClient("https://api.example.test/v1", "some-model")
+        stub = _UrlopenStub(body=body)
+        with patch("app.agent.provider.urlopen", stub):
+            result = client._extract_content(body)  # type: ignore[attr-defined]
+        self.assertEqual(result, "I was thinking about that.")
+
+    def test_reasoning_only_raises_provider_response_error(self) -> None:
+        """If filtering leaves no final answer, ``ProviderResponseError`` is raised."""
+        body = self._payload("", reasoning="<pause>all thinking</pause>")
+        client = ProviderClient("https://api.example.test/v1", "some-model")
+        stub = _UrlopenStub(body=body)
+        with patch("app.agent.provider.urlopen", stub):
+            with self.assertRaises(ProviderResponseError):
+                client._extract_content(body)  # type: ignore[attr-defined]
+
+    def test_complete_pause_block_at_start(self) -> None:
+        """A ``<pause>...</pause>`` block at the very start of content is removed."""
+        body = self._payload(
+            "<pause>thinking process</pause>The actual answer is 42.",
+            reasoning="unused",
+        )
+        client = ProviderClient("https://api.example.test/v1", "some-model")
+        stub = _UrlopenStub(body=body)
+        with patch("app.agent.provider.urlopen", stub):
+            result = client._extract_content(body)  # type: ignore[attr-defined]
+        self.assertEqual(result, "The actual answer is 42.")
+
+    def test_multiple_pause_blocks(self) -> None:
+        """Multiple ``<pause>...</pause>`` blocks are all stripped."""
+        body = self._payload(
+            "Start.<pause>mid1</pause>middle.<pause>mid2</pause>end.",
+            reasoning="unused",
+        )
+        client = ProviderClient("https://api.example.test/v1", "some-model")
+        stub = _UrlopenStub(body=body)
+        with patch("app.agent.provider.urlopen", stub):
+            result = client._extract_content(body)  # type: ignore[attr-defined]
+        self.assertEqual(result, "Start.middle.end.")
+
+    def test_pause_tag_with_attributes(self) -> None:
+        """``<pause something>...</pause>`` (with attributes) is also stripped."""
+        body = self._payload(
+            "Start.<pause class='thought'>mid</pause>end.",
+            reasoning="unused",
+        )
+        client = ProviderClient("https://api.example.test/v1", "some-model")
+        stub = _UrlopenStub(body=body)
+        with patch("app.agent.provider.urlopen", stub):
+            result = client._extract_content(body)  # type: ignore[attr-defined]
+        self.assertEqual(result, "Start.end.")

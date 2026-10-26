@@ -276,5 +276,25 @@ class ProviderClient:
             raise ProviderResponseError("Provider's message content was not a string.")
         if not content.strip():
             raise ProviderResponseError("Provider's message content was empty.")
+# Remove ``<pause>...</pause>`` blocks and unclosed ``<pause>`` blocks.
+        # 1. Remove complete ``<pause>...</pause>`` blocks (has both opening and closing tags).
+        #    This must come before handling unclosed blocks so the unclosed handler only
+        #    sees blocks that truly lack a closing tag.
+        content = re.sub(r'<pause\b[^>]*>.*?</pause\b[^>]*>', '', content, flags=re.DOTALL)
+
+        # 2. Handle unclosed ``<pause>`` block: strip from ``<pause`` to end.
+        #    Only runs if no matching ``</pause>`` was found in step 1.
+        content = re.sub(r'<pause\b[^>]*>.*$', '', content, flags=re.DOTALL)
+
+        # 3. Remove any remaining standalone ``</pause>`` closing tags (without a matching
+        #    opening tag earlier in the content).  Done after unclosed-block handling so we
+        #    don't accidentally expose reasoning content that was part of an unclosed block.
+        content = re.sub(r'</pause\s*>', '', content, flags=re.IGNORECASE)
+
+        # 4. Remove any remaining standalone ``<pause>`` opening tags (without a matching
+        #    closing tag).  Done last so ordinary text containing the word "pause" is preserved.
+        content = re.sub(r'<pause\b[^>]*?>', '', content, flags=re.IGNORECASE)
+
+        return content
 
         return content

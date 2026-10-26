@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+import torch
+
 try:
     # Official Turbo loading API:
     #   ChatterboxTurboTTS.from_pretrained(device="cpu")
@@ -120,7 +122,8 @@ class ChatterboxNanoEngine(TTSEngine):
             raise self._load_error
 
         try:
-            model = ChatterboxTurboTTS.from_pretrained(device="cpu")
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            model = ChatterboxTurboTTS.from_pretrained(device=device)
         except Exception as exc:  # noqa: BLE001 - surface loader failures clearly
             self._load_error = TTSError(
                 "Failed to load the Chatterbox model on CPU: "
