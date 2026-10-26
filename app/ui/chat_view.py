@@ -77,6 +77,9 @@ class ChatView(QWidget):
     voice_text_received = Signal(str)
     voice_text_ready = Signal(str)
 
+    #: Emitted when the speaker (voice output) toggle changes state.
+    speaker_toggled = Signal(bool)
+
     #: Emitted when the user asks to toggle chat-history recording.
     history_toggle_requested = Signal()
     #: Alias kept for callers that prefer a clicked-style name.
@@ -91,6 +94,8 @@ class ChatView(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._setup_ui()
+        # Voice output (TTS) starts OFF for every new session.
+        self._voice_output_enabled: bool = False
         self.voice_text_received.connect(self._insert_voice_text)
 
     def _setup_ui(self) -> None:
@@ -185,6 +190,22 @@ class ChatView(QWidget):
         self.mic_button = mic_button
         input_section.addWidget(mic_button)
 
+        # Speaker button - toggles voice output (TTS) on/off. No audio
+        # playback or inference happens here; this only records the toggle
+        # state so a future TTS integration can read it.
+        speaker_button = QPushButton("\U0001F507 Speaker: OFF")
+        speaker_button.setCheckable(True)
+        speaker_button.toggled.connect(self._toggle_speaker)
+        speaker_button.setStyleSheet(
+            "background-color: #4f46e5;"
+            "color: #ef4444;"
+            "border-radius: 8px; padding: 10px 24px;"
+            "font-weight: bold;"
+            "min-width: 90px;"
+        )
+        self.speaker_button = speaker_button
+        input_section.addWidget(speaker_button)
+
         # Set horizontal alignment for the input section layout
         input_section.setAlignment(Qt.AlignHCenter)
 
@@ -212,6 +233,38 @@ class ChatView(QWidget):
                 "font-weight: bold;"
                 "min-width: 90px;"
             )
+
+    def _toggle_speaker(self, checked: bool) -> None:
+        """Toggle voice output (TTS) on/off and update the button state.
+
+        No TTS inference or audio playback happens here; this only records
+        the toggle state so a future TTS integration can read it.
+        """
+        self._voice_output_enabled = bool(checked)
+        self.speaker_toggled.emit(bool(checked))
+        if checked:
+            self.speaker_button.setText("\U0001F50A Speaker: ON")
+            self.speaker_button.setStyleSheet(
+                "background-color: #4f46e5;"
+                "color: #22c55e;"
+                "border-radius: 8px; padding: 10px 24px;"
+                "font-weight: bold;"
+                "min-width: 90px;"
+            )
+        else:
+            self.speaker_button.setText("\U0001F507 Speaker: OFF")
+            self.speaker_button.setStyleSheet(
+                "background-color: #4f46e5;"
+                "color: #ef4444;"
+                "border-radius: 8px; padding: 10px 24px;"
+                "font-weight: bold;"
+                "min-width: 90px;"
+            )
+
+    @property
+    def voice_output_enabled(self) -> bool:
+        """Whether voice output (TTS) is currently enabled."""
+        return bool(self._voice_output_enabled)
 
     def _on_voice_text(self, text: str) -> None:
         self.voice_text_received.emit(text)

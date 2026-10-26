@@ -3,16 +3,20 @@
 import sys
 
 import os
+import threading
+import tempfile
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QStatusBar,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal, Slot, QBuffer, QIODevice, QUrl
 from PySide6.QtGui import QIcon
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 
 from app.agent.service import AgentService
 from app.storage.database import Database
+from app.tts_service import TTSService, TTSError, TTSUnsupportedError, TTSValidationError
 from app.ui.chat_history_view import ChatHistoryView
 from app.ui.chat_view import ChatView
 from app.ui.sidebar import Sidebar
@@ -33,6 +37,10 @@ CURRENT_GUI = None
 
 class LunaGUI(QMainWindow):
     """Main GUI window for the LUNA application."""
+
+    #: Emitted with WAV audio bytes when TTS synthesis is complete, to be
+    #: played back on the main (GUI) thread.
+    tts_ready = Signal(bytes)
 
     def __init__(self) -> None:
         super().__init__()
@@ -55,6 +63,21 @@ class LunaGUI(QMainWindow):
         self._message_queue = []
         self._processing_message = False
         self.user_name = "User"
+
+        # TTS playback state (lazily initialized - model is only loaded when
+        # the speaker is first turned ON).
+        self._tts_service = None
+        self._tts_player = None
+        self._tts_audio_output = None
+        self._tts_stop_requested = False
+        self._tts_lock = threading.Lock()
+        self._tts_temp_path = None
+
+        # Forward speaker-toggle state so TTS playback can be stopped when the
+        # user turns the speaker OFF.
+        self.chat_view.speaker_toggled.connect(self._on_speaker_toggled)
+        # Play synthesized audio on the main thread when the worker finishes.
+        self.tts_ready.connect(self._play_wav)
 
         # Restore the user name saved in a previous session, if any.
         try:
@@ -260,9 +283,106 @@ class LunaGUI(QMainWindow):
                         except Exception:
                             pass
                 _display_agent_message(response, self.msg_layout)
+                # Speak the response aloud if the speaker is ON. TTS runs in a
+                # background worker so the GUI stays responsive, and failures
+                # never interrupt the chat.
+                if self.chat_view.voice_output_enabled:
+                    self._speak(response)
                 QTimer.singleShot(0, self._process_next_queued)
 
         QTimer.singleShot(10, poll)
+
+    # ------------------------------------------------------------------
+    # Text-to-speech playback
+    # ------------------------------------------------------------------
+
+    def _on_speaker_toggled(self, checked: bool) -> None:
+        """Handle speaker toggle: stop playback when turned OFF."""
+        if not checked:
+            self._stop_tts()
+
+    def _stop_tts(self) -> None:
+        """Stop current playback and prevent pending speech from starting."""
+        with self._tts_lock:
+            self._tts_stop_requested = True
+        if self._tts_player is not None:
+            self._tts_player.stop()
+
+    def _get_tts_service(self) -> TTSService:
+        """Lazily create the TTS service (model is only loaded on first use)."""
+        if self._tts_service is None:
+            self._tts_service = TTSService()
+        return self._tts_service
+
+    def _ensure_tts_player(self) -> None:
+        """Create the Qt multimedia player/audio output on first use."""
+        if self._tts_player is None:
+            self._tts_player = QMediaPlayer()
+            self._tts_audio_output = QAudioOutput()
+            self._tts_player.setAudioOutput(self._tts_audio_output)
+
+    def _speak(self, text: str) -> None:
+        """Synthesize *text* in a background thread and play it aloud.
+
+        Runs TTS synthesis off the GUI thread so the interface stays
+        responsive. Any TTS failure is swallowed so it never interrupts
+        chat or crashes Luna.
+        """
+        with self._tts_lock:
+            if self._tts_stop_requested:
+                return
+
+        def worker() -> None:
+            # Re-check the stop flag inside the worker (it may have been set
+            # after the outer check but before the thread started).
+            with self._tts_lock:
+                if self._tts_stop_requested:
+                    return
+            try:
+                service = self._get_tts_service()
+                wav_bytes = service.synthesize(text)
+            except Exception:
+                # TTS failures must not interrupt chat or crash Luna.
+                return
+            with self._tts_lock:
+                if self._tts_stop_requested:
+                    return
+            # Playback happens on the GUI thread via a queued signal.
+            self.tts_ready.emit(wav_bytes)
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
+    @Slot(bytes)
+    def _play_wav(self, wav_bytes: bytes) -> None:
+        """Play WAV audio bytes on the GUI thread (queued from worker)."""
+        with self._tts_lock:
+            if self._tts_stop_requested:
+                return
+        self._ensure_tts_player()
+
+        # Clean up the previous temp file, if any.
+        if self._tts_temp_path:
+            try:
+                os.unlink(self._tts_temp_path)
+            except Exception:
+                pass
+            self._tts_temp_path = None
+
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                f.write(wav_bytes)
+                self._tts_temp_path = f.name
+            self._tts_player.setSource(QUrl.fromLocalFile(self._tts_temp_path))
+            self._tts_player.play()
+        except Exception:
+            # Playback failures must not crash Luna.
+            if self._tts_temp_path:
+                try:
+                    os.unlink(self._tts_temp_path)
+                except Exception:
+                    pass
+                self._tts_temp_path = None
 
     _update_api_status = _is_api_connected
     _refresh_api_status = _is_api_connected
