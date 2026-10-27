@@ -12,7 +12,7 @@ database failure tolerance are preserved.
 
 import json
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from app.agent.provider import (
     CHAT_COMPLETIONS_PATH,
@@ -695,6 +695,182 @@ class TestAgentService(unittest.TestCase):
             service = AgentService()
         self.assertIsNotNone(service)
         self.assertIs(AgentService._instance, service)  # type: ignore
+
+
+class TestAgentServiceToolCalling(unittest.TestCase):
+    """Tests for tool calling through AgentService."""
+
+    def setUp(self) -> None:
+        AgentService._instance = None  # type: ignore
+
+    def _mock_registry(self) -> MagicMock:
+        registry = MagicMock()
+        registry.get_tool_schemas.return_value = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get current weather for a city using Open-Meteo API",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ]
+        registry.list_tools.return_value = {"get_weather": {"name": "get_weather"}}
+        return registry
+
+    def test_ordinary_chat_returns_provider_text(self):
+        service = AgentService()
+        registry = self._mock_registry()
+        with patch("app.agent.service.Config", return_value=_configured_config()), patch(
+            "app.agent.service.ProviderClient"
+        ) as provider_factory, patch("app.agent.service._tool_registry", registry):
+            provider_factory.return_value.chat_completion.return_value = PROVIDER_REPLY
+            result = service.process_message("Hello, LUNA!")
+        self.assertEqual(result, PROVIDER_REPLY)
+        self.assertEqual(provider_factory.return_value.chat_completion.call_count, 1)
+
+    def test_successful_weather_call_returns_final_answer(self):
+        service = AgentService()
+        registry = self._mock_registry()
+        registry.execute.return_value = {"city": "Kaunas", "temperature": 21}
+        tool_call = {
+            "content": "Let me check the weather.",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "name": "get_weather",
+                    "arguments": '{"city": "Kaunas"}',
+                }
+            ],
+        }
+        with patch("app.agent.service.Config", return_value=_configured_config()), patch(
+            "app.agent.service.ProviderClient"
+        ) as provider_factory, patch("app.agent.service._tool_registry", registry):
+            provider_factory.return_value.chat_completion.side_effect = [
+                tool_call,
+                "The weather in Kaunas is 21 degrees.",
+            ]
+            result = service.process_message("What's the weather in Kaunas?")
+        self.assertEqual(result, "The weather in Kaunas is 21 degrees.")
+        self.assertEqual(provider_factory.return_value.chat_completion.call_count, 2)
+        registry.execute.assert_called_once_with("get_weather", city="Kaunas")
+
+    def test_unknown_tool_is_rejected(self):
+        service = AgentService()
+        registry = self._mock_registry()
+        registry.list_tools.return_value = {}
+        tool_call = {
+            "content": "Let me try.",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "name": "get_stock_price",
+                    "arguments": '{"symbol": "AAPL"}',
+                }
+            ],
+        }
+        with patch("app.agent.service.Config", return_value=_configured_config()), patch(
+            "app.agent.service.ProviderClient"
+        ) as provider_factory, patch("app.agent.service._tool_registry", registry):
+            provider_factory.return_value.chat_completion.side_effect = [
+                tool_call,
+                "I can't look up stock prices.",
+            ]
+            result = service.process_message("What's AAPL at?")
+        self.assertEqual(result, "I can't look up stock prices.")
+        registry.execute.assert_not_called()
+
+
+    def test_invalid_json_arguments_are_rejected(self):
+        service = AgentService()
+        registry = self._mock_registry()
+        tool_call = {
+            "content": "Let me check.",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "name": "get_weather",
+                    "arguments": "not valid json",
+                }
+            ],
+        }
+        with patch("app.agent.service.Config", return_value=_configured_config()), patch(
+            "app.agent.service.ProviderClient"
+        ) as provider_factory, patch("app.agent.service._tool_registry", registry):
+            provider_factory.return_value.chat_completion.side_effect = [
+                tool_call,
+                "I couldn't parse the arguments.",
+            ]
+            result = service.process_message("Weather?")
+        self.assertEqual(result, "I couldn't parse the arguments.")
+        registry.execute.assert_not_called()
+
+    def test_weather_failure_is_handled_gracefully(self):
+        service = AgentService()
+        registry = self._mock_registry()
+        registry.execute.side_effect = RuntimeError("weather API down")
+        tool_call = {
+            "content": "Let me check.",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "name": "get_weather",
+                    "arguments": '{"city": "Kaunas"}',
+                }
+            ],
+        }
+        with patch("app.agent.service.Config", return_value=_configured_config()), patch(
+            "app.agent.service.ProviderClient"
+        ) as provider_factory, patch("app.agent.service._tool_registry", registry):
+            provider_factory.return_value.chat_completion.side_effect = [
+                tool_call,
+                "Sorry, I couldn't fetch the weather.",
+            ]
+            result = service.process_message("Weather in Kaunas?")
+        self.assertEqual(result, "Sorry, I couldn't fetch the weather.")
+        registry.execute.assert_called_once()
+
+    def test_tool_execution_limited_to_one_round(self):
+        service = AgentService()
+        registry = self._mock_registry()
+        registry.execute.return_value = {"city": "Kaunas", "temperature": 21}
+        tool_call = {
+            "content": "Let me check.",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "name": "get_weather",
+                    "arguments": '{"city": "Kaunas"}',
+                }
+            ],
+        }
+        with patch("app.agent.service.Config", return_value=_configured_config()), patch(
+            "app.agent.service.ProviderClient"
+        ) as provider_factory, patch("app.agent.service._tool_registry", registry):
+            provider_factory.return_value.chat_completion.side_effect = [
+                tool_call,
+                tool_call,
+            ]
+            result = service.process_message("Weather?")
+        self.assertEqual(registry.execute.call_count, 1)
+        self.assertEqual(provider_factory.return_value.chat_completion.call_count, 2)
+
+    def test_tools_are_passed_to_provider(self):
+        service = AgentService()
+        registry = self._mock_registry()
+        with patch("app.agent.service.Config", return_value=_configured_config()), patch(
+            "app.agent.service.ProviderClient"
+        ) as provider_factory, patch("app.agent.service._tool_registry", registry):
+            provider_factory.return_value.chat_completion.return_value = PROVIDER_REPLY
+            service.process_message("Hello, LUNA!")
+        call = provider_factory.return_value.chat_completion.call_args
+        self.assertIn("tools", call.kwargs)
+        self.assertEqual(call.kwargs["tools"], registry.get_tool_schemas.return_value)
 
 
 if __name__ == "__main__":

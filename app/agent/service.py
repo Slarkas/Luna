@@ -33,11 +33,14 @@ Examples:
 
 from __future__ import annotations
 
+import json
 import threading
+from typing import Any
 
 from app.agent.provider import ProviderClient, ProviderError
 from app.config import Config
 from app.storage.database import Database
+from app.tools.registry import _tool_registry
 
 
 # Small, fixed prompt turn sent alongside the user's message so the model has
@@ -429,6 +432,19 @@ class AgentService:
                 # Creation failed - do not store any ID and continue processing
                 return None
 
+    def _get_tool_registry(self):
+        """Return the tool registry used to advertise and execute tools.
+
+        Tests may override this by setting ``self._tool_registry`` to a stub
+        registry; otherwise the module-level registry (with ``get_weather``
+        registered) is used.
+        """
+        registry = getattr(self, "_tool_registry", None)
+        if registry is None:
+            registry = _tool_registry
+        return registry
+
+
     def _provider_response(self, message: str) -> str:
         """Ask the configured provider for the assistant's reply to *message*.
 
@@ -441,8 +457,13 @@ class AgentService:
             # Nothing is configured to answer with - say so instead of pretending.
             return PROVIDER_NOT_CONFIGURED_ERROR
 
+        registry = self._get_tool_registry()
+        tools = registry.get_tool_schemas() if registry is not None else None
+
+        messages = self._provider_messages(message)
+
         try:
-            return client.chat_completion(self._provider_messages(message))
+            result = client.chat_completion(messages, tools=tools)
         except ProviderError:
             # ProviderError is the base class of every provider failure, so one
             # handler covers unreachable endpoints, timeouts, error statuses and
@@ -455,6 +476,116 @@ class AgentService:
             # gets a fixed notice instead, and the failure detail is never
             # exposed as the visible reply.
             return SERVICE_FAILURE_MESSAGE
+
+        # Ordinary chat response: just return the text.
+        if isinstance(result, str):
+            return result
+
+        # Anything that is not a tool-call response is unusable.
+        if not isinstance(result, dict) or not result.get("tool_calls"):
+            content = result.get("content") if isinstance(result, dict) else None
+            if isinstance(content, str) and content.strip():
+                return content
+            # Preserve the previous behaviour of returning an unexpected
+            # response type verbatim rather than substituting a fallback.
+            if not isinstance(result, dict):
+                return result
+            return PROVIDER_FAILURE_ERROR
+
+        # Tool calls requested - execute them (single round only).
+        assistant_content = result.get("content")
+        if assistant_content is None:
+            assistant_content = ""
+
+        tool_calls = result["tool_calls"]
+
+        # Build the assistant tool-call message in OpenAI format.
+        assistant_msg: dict[str, Any] = {
+            "role": "assistant",
+            "content": assistant_content,
+            "tool_calls": [
+                {
+                    "id": (tc.get("id") if isinstance(tc, dict) else None),
+                    "type": "function",
+                    "function": {
+                        "name": (tc.get("name") if isinstance(tc, dict) else None),
+                        "arguments": (
+                            tc.get("arguments")
+                            if (isinstance(tc, dict) and tc.get("arguments") is not None)
+                            else "{}"
+                        ),
+                    },
+                }
+                for tc in tool_calls
+                if isinstance(tc, dict)
+            ],
+        }
+        messages = list(messages) + [assistant_msg]
+
+        registered = set(registry.list_tools().keys()) if registry is not None else set()
+
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                continue
+            tool_name = tc.get("name")
+            tool_call_id = tc.get("id")
+            raw_args = tc.get("arguments", "{}")
+            if raw_args is None:
+                raw_args = "{}"
+
+            # Parse the function's JSON arguments.
+            parse_error = False
+            parsed: Any = None
+            try:
+                parsed = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            except (json.JSONDecodeError, TypeError, ValueError):
+                parse_error = True
+            if not parse_error and not isinstance(parsed, dict):
+                parse_error = True
+
+            if parse_error:
+                tool_result = f"Error: invalid arguments for tool '{tool_name}'."
+            elif tool_name not in registered:
+                tool_result = f"Error: unknown tool '{tool_name}'."
+            else:
+                try:
+                    outcome = registry.execute(tool_name, **parsed)
+                except Exception as exc:  # noqa: S110
+                    tool_result = f"Error: tool '{tool_name}' failed: {exc}"
+                else:
+                    if isinstance(outcome, str):
+                        tool_result = outcome
+                    else:
+                        try:
+                            tool_result = json.dumps(outcome)
+                        except (TypeError, ValueError):
+                            tool_result = str(outcome)
+
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": tool_result,
+                }
+            )
+
+        # Final answer round (no tools passed to prevent further tool calls).
+        try:
+            final = client.chat_completion(messages)
+        except ProviderError:
+            return PROVIDER_FAILURE_ERROR
+        except Exception:  # noqa: S110
+            return SERVICE_FAILURE_MESSAGE
+
+        if isinstance(final, str):
+            return final
+        if isinstance(final, dict):
+            content = final.get("content")
+            if isinstance(content, str) and content.strip():
+                return content
+            if content is not None:
+                return str(content)
+        return PROVIDER_FAILURE_ERROR
 
     def _get_provider_client(self) -> ProviderClient | None:
         """Return the lazily built provider client, or None when unusable.

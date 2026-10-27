@@ -7,6 +7,7 @@ suite exercises success and failure paths without touching a network.
 
 import json
 import unittest
+from typing import Any
 from unittest.mock import patch
 
 from app.agent.provider import (
@@ -392,6 +393,227 @@ class TestProviderTransport(unittest.TestCase):
         self.assertNotIn(API_KEY, message)
         self.assertNotIn("failed", message)
 
+
+def _tool_call_payload(content: str | None, tool_calls: list[dict[str, Any]]) -> bytes:
+    """Return a chat completion body whose message carries *tool_calls*."""
+    obj = {
+        "id": "stub-id",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "whatever",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+    if tool_calls is not None:
+        obj["choices"][0]["message"]["tool_calls"] = tool_calls
+    return json.dumps(obj).encode("utf-8")
+
+
+def _weather_tool() -> dict[str, Any]:
+    """Return a single OpenAI-function-style tool definition."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get current weather for a city.",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    }
+
+
+class TestProviderToolCalling(unittest.TestCase):
+    """Tests for tool calling through ``ProviderClient.chat_completion``."""
+
+    def test_no_tools_or_tool_choice_sent_when_neither_is_provided(self):
+        stub = _UrlopenStub(body=_completion_payload("ok"))
+        with patch("app.agent.provider.urlopen", stub):
+            ProviderClient(BASE_ENDPOINT, "some-model").chat_completion(ONE_TURN)
+        payload = json.loads(_sent_request(stub).data.decode("utf-8"))
+        self.assertNotIn("tools", payload)
+        self.assertNotIn("tool_choice", payload)
+
+    def test_tools_sent_only_when_provided(self):
+        stub = _UrlopenStub(body=_completion_payload("ok"))
+        with patch("app.agent.provider.urlopen", stub):
+            ProviderClient(BASE_ENDPOINT, "some-model").chat_completion(
+                ONE_TURN, tools=[_weather_tool()]
+            )
+        payload = json.loads(_sent_request(stub).data.decode("utf-8"))
+        self.assertEqual(payload["tools"], [_weather_tool()])
+        self.assertNotIn("tool_choice", payload)
+
+    def test_tool_choice_sent_only_when_provided(self):
+        stub = _UrlopenStub(body=_completion_payload("ok"))
+        with patch("app.agent.provider.urlopen", stub):
+            ProviderClient(BASE_ENDPOINT, "some-model").chat_completion(
+                ONE_TURN, tool_choice="required"
+            )
+        payload = json.loads(_sent_request(stub).data.decode("utf-8"))
+        self.assertEqual(payload["tool_choice"], "required")
+        self.assertNotIn("tools", payload)
+
+    def test_tools_and_tool_choice_sent_together(self):
+        stub = _UrlopenStub(body=_completion_payload("ok"))
+        with patch("app.agent.provider.urlopen", stub):
+            ProviderClient(BASE_ENDPOINT, "some-model").chat_completion(
+                ONE_TURN, tools=[_weather_tool()], tool_choice="required"
+            )
+        payload = json.loads(_sent_request(stub).data.decode("utf-8"))
+        self.assertEqual(payload["tools"], [_weather_tool()])
+        self.assertEqual(payload["tool_choice"], "required")
+
+    def test_ordinary_response_returns_a_string(self):
+        stub = _UrlopenStub(body=_completion_payload("Hello there."))
+        with patch("app.agent.provider.urlopen", stub):
+            result = ProviderClient(BASE_ENDPOINT, "some-model").chat_completion(ONE_TURN)
+        self.assertIsInstance(result, str)
+        self.assertEqual(result, "Hello there.")
+
+    def test_tool_call_response_returns_structured_data(self):
+        tool_calls = [
+            {
+                "id": "call_abc123",
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "arguments": '{"city": "Kaunas"}',
+                },
+            }
+        ]
+        stub = _UrlopenStub(body=_tool_call_payload(
+            content="Let me check the weather.", tool_calls=tool_calls
+        ))
+        with patch("app.agent.provider.urlopen", stub):
+            result = ProviderClient(BASE_ENDPOINT, "some-model").chat_completion(
+                ONE_TURN, tools=[_weather_tool()]
+            )
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["content"], "Let me check the weather.")
+        self.assertEqual(len(result["tool_calls"]), 1)
+        self.assertEqual(result["tool_calls"][0]["id"], "call_abc123")
+        self.assertEqual(result["tool_calls"][0]["name"], "get_weather")
+        self.assertEqual(result["tool_calls"][0]["arguments"], '{"city": "Kaunas"}')
+
+    def test_multiple_tool_calls_are_all_returned(self):
+        tool_calls = [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "arguments": '{"city": "Kaunas"}',
+                },
+            },
+            {
+                "id": "call_2",
+                "type": "function",
+                "function": {
+                    "name": "get_time",
+                    "arguments": '{"timezone": "Europe/Vilnius"}',
+                },
+            },
+        ]
+        stub = _UrlopenStub(body=_tool_call_payload(
+            content="I'll call two tools.", tool_calls=tool_calls
+        ))
+        with patch("app.agent.provider.urlopen", stub):
+            result = ProviderClient(BASE_ENDPOINT, "some-model").chat_completion(
+                ONE_TURN, tools=[_weather_tool()]
+            )
+        self.assertIsInstance(result, dict)
+        self.assertEqual(len(result["tool_calls"]), 2)
+        self.assertEqual(result["tool_calls"][0]["id"], "call_1")
+        self.assertEqual(result["tool_calls"][0]["name"], "get_weather")
+        self.assertEqual(result["tool_calls"][0]["arguments"], '{"city": "Kaunas"}')
+        self.assertEqual(result["tool_calls"][1]["id"], "call_2")
+        self.assertEqual(result["tool_calls"][1]["name"], "get_time")
+        self.assertEqual(result["tool_calls"][1]["arguments"], '{"timezone": "Europe/Vilnius"}')
+
+    def test_tool_call_with_no_content_uses_empty_string(self):
+        tool_calls = [
+            {
+                "id": "call_x",
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "arguments": "{}",
+                },
+            }
+        ]
+        stub = _UrlopenStub(body=_tool_call_payload(
+            content=None, tool_calls=tool_calls
+        ))
+        with patch("app.agent.provider.urlopen", stub):
+            result = ProviderClient(BASE_ENDPOINT, "some-model").chat_completion(ONE_TURN)
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["content"], "")
+        self.assertEqual(len(result["tool_calls"]), 1)
+
+    def test_malformed_tool_calls_raise_provider_response_error(self):
+        cases = [
+            # tool_calls is not a list
+            "not a list",
+            # tool call entry is not a mapping
+            [["not", "a", "mapping"]],
+            # function is not a mapping
+            [{"id": "call_1", "function": "not a mapping"}],
+            # arguments is not a string
+            [
+                {
+                    "id": "call_1",
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": {"city": "Kaunas"},
+                    },
+                }
+            ],
+        ]
+        for tool_calls in cases:
+            stub = _UrlopenStub(body=_tool_call_payload(
+                content="text", tool_calls=tool_calls
+            ))
+            with patch("app.agent.provider.urlopen", stub):
+                with self.assertRaises(ProviderResponseError):
+                    ProviderClient(BASE_ENDPOINT, "some-model").chat_completion(ONE_TURN)
+
+    def test_malformed_top_level_json_raises_provider_response_error(self):
+        stub = _UrlopenStub(body=b"{not valid json")
+        with patch("app.agent.provider.urlopen", stub):
+            with self.assertRaises(ProviderResponseError):
+                ProviderClient(BASE_ENDPOINT, "some-model").chat_completion(ONE_TURN)
+
+    def test_error_messages_scrub_api_key_and_response_body(self):
+        client = ProviderClient(BASE_ENDPOINT, "some-model", api_key=API_KEY)
+
+        # Malformed top-level JSON that contains the key must not leak it.
+        body = f"{{broken json key={API_KEY}}}".encode("utf-8")
+        stub = _UrlopenStub(body=body)
+        with patch("app.agent.provider.urlopen", stub):
+            with self.assertRaises(ProviderResponseError) as caught:
+                client.chat_completion(ONE_TURN)
+        message = str(caught.exception)
+        self.assertNotIn(API_KEY, message)
+        self.assertNotIn("broken json", message)
+
+        # A malformed tool call must not leak the key or the body into the error.
+        stub = _UrlopenStub(body=_tool_call_payload(
+            content="text", tool_calls="not a list"
+        ))
+        with patch("app.agent.provider.urlopen", stub):
+            with self.assertRaises(ProviderResponseError) as caught:
+                client.chat_completion(ONE_TURN)
+        message = str(caught.exception)
+        self.assertNotIn(API_KEY, message)
+        self.assertNotIn("not a list", message)
 
 class TestProviderExtractContent(unittest.TestCase):
     """Tests for ``ProviderClient._extract_content`` - reasoning block stripping."""

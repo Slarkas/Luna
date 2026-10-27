@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence
+from typing import Any
 
 from urllib.request import (
     HTTPError,
@@ -164,39 +165,52 @@ class ProviderClient:
             return url
         return url + CHAT_COMPLETIONS_PATH
 
-    def chat_completion(self, messages: Sequence[Mapping[str, str]]) -> str:
+    def chat_completion(self, messages: Sequence[Mapping[str, str]], *, tools: list[dict[str, Any]] | None = None, tool_choice: str | None = None) -> str | dict[str, Any]:
         """Request a completion and return the assistant's text.
 
+        Optionally accepts ``tools`` (a list of OpenAI-function-style tool definitions)
+        and ``tool_choice`` to enable tool calling. When the provider returns
+        ``message.tool_calls`` the method returns a dict with the assistant content
+        and structured tool call information. Otherwise the existing string return
+        value is preserved.
+
         Args:
-            messages: Chat turns as ``{"role": ..., "content": ...}`` mappings,
-                ordered oldest to newest.
+            messages: Chat conversation messages.
+            tools: Optional list of tool/function definitions compatible with the
+                OpenAI chat completions tool calling format.
+            tool_choice: Optional tool choice hint (e.g. "required", "auto", or a
+                tool name string).
 
         Returns:
-            The ``content`` of the first returned choice, exactly as the
-            provider phrased it (whitespace is preserved, never stripped).
-
-        Raises:
-            ValueError: When *messages* is not a non-empty sequence of usable
-                message mappings (checked before any network work happens).
-            ProviderConnectionError: The endpoint was unreachable or timed out.
-            ProviderHTTPError: The provider answered with an error status.
-            ProviderResponseError: The reply body was empty, was not JSON, had
-                no choices, or carried no assistant text.
+            Assistant text string when no tool calls are returned, or a dict with
+            ``"content"`` (assistant message, may be ``None``) and
+            ``"tool_calls`` (list of parsed tool call dicts) when the provider
+            returns tool calls.
         """
         validated = self._validate_messages(messages)
-        request = Request(
+
+        body: dict[str, Any] = {
+            "model": self.model,
+            "messages": validated,
+        }
+        if tools is not None:
+            body["tools"] = tools
+        if tool_choice is not None:
+            body["tool_choice"] = tool_choice
+
+        req = Request(
             self.request_url,
-            data=json.dumps({"model": self.model, "messages": validated}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
             method="POST",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
         )
         if self._api_key:
-            request.add_header("Authorization", f"Bearer {self._api_key}")
+            req.add_header("Authorization", f"Bearer {self._api_key}")
 
         try:
-            response = urlopen(request, timeout=self.timeout)
+            resp = urlopen(req, timeout=self.timeout)
         except HTTPError as exc:
-            # HTTPError subclasses URLError, so it has to be caught first. Only
+            # HTTPError subclasses URLError, so it must be caught first. Only
             # the status line is reported: neither the response headers nor the
             # response body are ever echoed into the message.
             reason = _describe_exception(exc, self._api_key) or "no reason given"
@@ -210,7 +224,22 @@ class ProviderClient:
                 f" Reason: {_describe_exception(exc, self._api_key)}."
             ) from exc
 
-        return self._extract_content(response.read())
+        raw_body = resp.read()
+        if not raw_body or not str(raw_body).strip():
+            raise ProviderResponseError("Provider returned an empty response body.")
+        try:
+            payload = json.loads(raw_body)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ProviderResponseError(
+                "Provider response was not a JSON value. The response body is"
+                " never echoed back, so a malformed provider cannot leak"
+                " credentials through this client."
+            ) from exc
+
+        # Extract content and check for tool calls
+        result = self._extract_with_tools(payload)
+
+        return result
 
     def _validate_messages(self, messages: Sequence[Mapping[str, str]]) -> list[Mapping[str, str]]:
         """Return a copy of *messages* after confirming they are usable turns."""
@@ -296,5 +325,86 @@ class ProviderClient:
         content = re.sub(r'<pause\b[^>]*?>', '', content, flags=re.IGNORECASE)
 
         return content
+
+    def _extract_with_tools(self, payload: Mapping[str, Any]) -> str | dict[str, Any]:
+        """Parse a chat completion payload and return content or tool calls.
+
+        Returns a dict with ``"content"`` (assistant message, possibly ``None``)
+        and ``"tool_calls`` (list of dicts with ``"id"``, ``"name"``, and
+        ``"arguments"``) when the provider returns tool calls. Otherwise returns
+        just the assistant content string.
+
+        Raises:
+            ProviderResponseError: If the payload is unusable or tool calls are
+                malformed.
+        """
+        if not isinstance(payload, Mapping):
+            raise ProviderResponseError(
+                "Provider response was valid JSON but not a JSON object."
+            )
+
+        choices = payload.get("choices")
+        if not isinstance(choices, Sequence) or isinstance(choices, (str, bytes)) or not choices:
+            raise ProviderResponseError(
+                "Provider response contained no usable 'choices' list."
+            )
+
+        first_choice = choices[0]
+        if not isinstance(first_choice, Mapping):
+            raise ProviderResponseError("Provider's first choice was not a JSON object.")
+
+        message = first_choice.get("message")
+        if not isinstance(message, Mapping):
+            raise ProviderResponseError("Provider's first choice carried no 'message' object.")
+
+        # Check for tool calls first
+        tool_calls = message.get("tool_calls")
+        if tool_calls is not None:
+            if not isinstance(tool_calls, Sequence):
+                raise ProviderResponseError(
+                    "Provider's 'tool_calls' is not a valid list."
+                )
+
+            parsed_calls: list[dict[str, Any]] = []
+            for call in tool_calls:
+                if not isinstance(call, Mapping):
+                    raise ProviderResponseError(
+                        "Provider's tool call entry was not a JSON object."
+                    )
+                call_id = call.get("id")
+                function = call.get("function", {})
+                if not isinstance(function, Mapping):
+                    raise ProviderResponseError(
+                        "Provider's tool call 'function' was not a JSON object."
+                    )
+                func_name = function.get("name")
+                func_args = function.get("arguments")
+                if func_args is not None and not isinstance(func_args, str):
+                    raise ProviderResponseError(
+                        "Provider's tool call 'function.arguments' must be a string."
+                    )
+                parsed_calls.append(
+                    {
+                        "id": call_id,
+                        "name": func_name,
+                        "arguments": func_args if func_args is not None else "{}",
+                    }
+                )
+
+            # Also get any content (may be none when tool calls are present)
+            content = message.get("content")
+            if content is None:
+                content = ""
+
+            return {"content": content, "tool_calls": parsed_calls}
+
+        # No tool calls - fall back to existing content extraction
+        content = message.get("content")
+        if content is None:
+            raise ProviderResponseError("Provider's message contained no 'content' field.")
+        if not isinstance(content, str):
+            raise ProviderResponseError("Provider's message content was not a string.")
+        if not content.strip():
+            raise ProviderResponseError("Provider's message content was empty.")
 
         return content
