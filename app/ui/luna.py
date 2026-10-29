@@ -4,19 +4,18 @@ import sys
 
 import os
 import threading
-import tempfile
+from app.ui.tts_controller import TTSController
+from app.ui.settings_controller import SettingsController
+from app.ui.chat_controller import ChatController
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QStatusBar,
 )
-from PySide6.QtCore import Qt, Signal, Slot, QBuffer, QIODevice, QUrl
+from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QIcon
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
-
 from app.agent.service import AgentService
 from app.storage.database import Database
-from app.tts_service import TTSService, TTSError, TTSUnsupportedError, TTSValidationError
 from app.ui.chat_history_view import ChatHistoryView
 from app.ui.chat_view import ChatView
 from app.ui.sidebar import Sidebar
@@ -38,10 +37,6 @@ CURRENT_GUI = None
 class LunaGUI(QMainWindow):
     """Main GUI window for the LUNA application."""
 
-    #: Emitted with WAV audio bytes when TTS synthesis is complete, to be
-    #: played back on the main (GUI) thread.
-    tts_ready = Signal(bytes)
-
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("LUNA")
@@ -60,24 +55,22 @@ class LunaGUI(QMainWindow):
         self._current_view: str = "chat"
 
         self._setup_ui()
-        self._message_queue = []
-        self._processing_message = False
         self.user_name = "User"
 
-        # TTS playback state (lazily initialized - model is only loaded when
-        # the speaker is first turned ON).
-        self._tts_service = None
-        self._tts_player = None
-        self._tts_audio_output = None
-        self._tts_stop_requested = False
-        self._tts_lock = threading.Lock()
-        self._tts_temp_path = None
+        self.tts_controller = TTSController()
+        self.settings_controller = SettingsController(
+            agent_service_factory=AgentService,
+            database_factory=Database.get_instance,
+        )
+        self.chat_controller = ChatController(
+            agent_service_factory=AgentService,
+            on_response=self._handle_chat_response,
+            on_error=self._handle_chat_error,
+        )
 
         # Forward speaker-toggle state so TTS playback can be stopped when the
         # user turns the speaker OFF.
         self.chat_view.speaker_toggled.connect(self._on_speaker_toggled)
-        # Play synthesized audio on the main thread when the worker finishes.
-        self.tts_ready.connect(self._play_wav)
 
         # Restore the user name saved in a previous session, if any.
         try:
@@ -151,9 +144,8 @@ class LunaGUI(QMainWindow):
         self.input_edit.clear()
 
         # Queue the message so several submissions can be written one after
-        # another without waiting; they are processed strictly in order.
-        self._message_queue.append(input_text)
-        self._ensure_processing()
+        # another without waiting; ChatController owns queue processing.
+        self.chat_controller.enqueue(input_text)
 
     def _on_history_clicked(self) -> None:
         """Handle history button click - toggle chat history recording.
@@ -217,173 +209,7 @@ class LunaGUI(QMainWindow):
         self.status_bar.showMessage("Settings opened.")
 
     def _is_api_connected(self) -> bool:
-        try:
-            return AgentService().is_api_connected()
-        except Exception:
-            return False
-    def _ensure_processing(self) -> None:
-        """Start processing queued messages if nothing is running."""
-        if self._processing_message:
-            return
-        if not self._message_queue:
-            return
-        self._processing_message = True
-        self._process_next_queued()
-
-    def _process_next_queued(self) -> None:
-        """Process the next queued message, then continue with the rest."""
-        if not self._message_queue:
-            self._processing_message = False
-            return
-
-        message = self._message_queue.pop(0)
-
-        import threading
-
-        from PySide6.QtCore import QTimer
-
-        result = {"value": None, "error": None}
-
-        def worker() -> None:
-            try:
-                result["value"] = AgentService().process_message(message)
-            except Exception as exc:  # noqa: BLE001
-                result["error"] = exc
-
-        thread = threading.Thread(target=worker, daemon=True)
-        thread.start()
-
-        def poll() -> None:
-            if thread.is_alive():
-                QTimer.singleShot(10, poll)
-            else:
-                if result["error"] is not None:
-                    exc = result["error"]
-                    name = type(exc).__name__
-                    text = str(exc).lower()
-                    if "could not be reached" in text or "connection" in name.lower() or "providerconnection" in name.lower():
-                        response = "api is not connected"
-                        try:
-                            self.chat_view.set_api_connected(False)
-                        except Exception:
-                            pass
-                    else:
-                        response = "An internal error occurred while processing your message."
-                else:
-                    response = result["value"]
-                    lowered = str(response).strip().lower()
-                    if lowered == "api is not connected" or lowered.startswith("error:"):
-                        try:
-                            self.chat_view.set_api_connected(False)
-                        except Exception:
-                            pass
-                    else:
-                        try:
-                            self.chat_view.set_api_connected(True)
-                        except Exception:
-                            pass
-                _display_agent_message(response, self.msg_layout)
-                # Speak the response aloud if the speaker is ON. TTS runs in a
-                # background worker so the GUI stays responsive, and failures
-                # never interrupt the chat.
-                if self.chat_view.voice_output_enabled:
-                    self._speak(response)
-                QTimer.singleShot(0, self._process_next_queued)
-
-        QTimer.singleShot(10, poll)
-
-    # ------------------------------------------------------------------
-    # Text-to-speech playback
-    # ------------------------------------------------------------------
-
-    def _on_speaker_toggled(self, checked: bool) -> None:
-        """Handle speaker toggle: stop playback when turned OFF."""
-        if not checked:
-            self._stop_tts()
-
-    def _stop_tts(self) -> None:
-        """Stop current playback and prevent pending speech from starting."""
-        with self._tts_lock:
-            self._tts_stop_requested = True
-        if self._tts_player is not None:
-            self._tts_player.stop()
-
-    def _get_tts_service(self) -> TTSService:
-        """Lazily create the TTS service (model is only loaded on first use)."""
-        if self._tts_service is None:
-            self._tts_service = TTSService()
-        return self._tts_service
-
-    def _ensure_tts_player(self) -> None:
-        """Create the Qt multimedia player/audio output on first use."""
-        if self._tts_player is None:
-            self._tts_player = QMediaPlayer()
-            self._tts_audio_output = QAudioOutput()
-            self._tts_player.setAudioOutput(self._tts_audio_output)
-
-    def _speak(self, text: str) -> None:
-        """Synthesize *text* in a background thread and play it aloud.
-
-        Runs TTS synthesis off the GUI thread so the interface stays
-        responsive. Any TTS failure is swallowed so it never interrupts
-        chat or crashes Luna.
-        """
-        with self._tts_lock:
-            if self._tts_stop_requested:
-                return
-
-        def worker() -> None:
-            # Re-check the stop flag inside the worker (it may have been set
-            # after the outer check but before the thread started).
-            with self._tts_lock:
-                if self._tts_stop_requested:
-                    return
-            try:
-                service = self._get_tts_service()
-                wav_bytes = service.synthesize(text)
-            except Exception:
-                # TTS failures must not interrupt chat or crash Luna.
-                return
-            with self._tts_lock:
-                if self._tts_stop_requested:
-                    return
-            # Playback happens on the GUI thread via a queued signal.
-            self.tts_ready.emit(wav_bytes)
-
-        thread = threading.Thread(target=worker, daemon=True)
-        thread.start()
-
-    @Slot(bytes)
-    def _play_wav(self, wav_bytes: bytes) -> None:
-        """Play WAV audio bytes on the GUI thread (queued from worker)."""
-        with self._tts_lock:
-            if self._tts_stop_requested:
-                return
-        self._ensure_tts_player()
-
-        # Clean up the previous temp file, if any.
-        if self._tts_temp_path:
-            try:
-                os.unlink(self._tts_temp_path)
-            except Exception:
-                pass
-            self._tts_temp_path = None
-
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                f.write(wav_bytes)
-                self._tts_temp_path = f.name
-            self._tts_player.setSource(QUrl.fromLocalFile(self._tts_temp_path))
-            self._tts_player.play()
-        except Exception:
-            # Playback failures must not crash Luna.
-            if self._tts_temp_path:
-                try:
-                    os.unlink(self._tts_temp_path)
-                except Exception:
-                    pass
-                self._tts_temp_path = None
-
+        return _get_settings_controller(self).is_api_connected()
     _update_api_status = _is_api_connected
     _refresh_api_status = _is_api_connected
     update_api_status = _is_api_connected
@@ -395,10 +221,7 @@ class LunaGUI(QMainWindow):
     is_api_connected = _is_api_connected
 
     def _on_api_settings_applied(self, **kwargs) -> None:
-        try:
-            AgentService().apply_api_settings(**kwargs)
-        except Exception:  # noqa: S110
-            pass
+        _get_settings_controller(self).apply_api_settings(**kwargs)
         if hasattr(self, "chat_view") and hasattr(self.chat_view, "set_api_connected"):
             try:
                 self.chat_view.set_api_connected(self._is_api_connected())
@@ -408,53 +231,25 @@ class LunaGUI(QMainWindow):
         self.status_bar.showMessage("API settings updated.")
 
     def _on_username_settings_applied(self, *args, **kwargs) -> None:
-        name = None
-        if args:
-            if isinstance(args[0], str):
-                name = args[0]
-        for key in ("username", "user_name", "name"):
-            if name is None and key in kwargs and kwargs[key] is not None:
-                name = kwargs[key]
-        if name is None and kwargs:
-            # Last resort: first value.
-            try:
-                name = next(iter(kwargs.values()))
-            except Exception:
-                name = None
-        name = str(name).strip() if name is not None else ""
-        if not name:
-            name = self.user_name or "User"
+        name = _get_settings_controller(self).normalize_username_for_settings(
+            self.user_name, *args, **kwargs
+        )
         self.user_name = name
         global USER_NAME
         USER_NAME = name
-        self._persist_user_name(name)
+        _get_settings_controller(self).persist_user_name(name)
         self.status_bar.showMessage("User name updated.")
 
     def _on_username_changed(self, *args, **kwargs) -> None:
-        name = None
-        if args:
-            if isinstance(args[0], str):
-                name = args[0]
-            else:
-                try:
-                    name = str(args[0])
-                except Exception:
-                    name = None
-        for key in ("username", "user_name", "name"):
-            if name is None and key in kwargs and kwargs[key] is not None:
-                name = kwargs[key]
-        if name is None and not args and kwargs:
-            try:
-                name = next(iter(kwargs.values()))
-            except Exception:
-                name = None
-        name = str(name).strip() if name is not None else ""
+        name = _get_settings_controller(self).normalize_username_for_change(
+            self.user_name, *args, **kwargs
+        )
         if not name:
             return
         self.user_name = name
         global USER_NAME
         USER_NAME = name
-        self._persist_user_name(name)
+        _get_settings_controller(self).persist_user_name(name)
 
     def _on_new_chat_clicked(self) -> None:
         """Start a fresh chat: clear the chat area and reset conversation state."""
@@ -467,17 +262,7 @@ class LunaGUI(QMainWindow):
         self.status_bar.showMessage("New chat started.")
 
     def _persist_user_name(self, name: str) -> None:
-        """Persist the user name to the shared database, never raising."""
-        try:
-            database = Database.get_instance()
-            database.initialize()
-            if hasattr(database, "set_user_name"):
-                database.set_user_name(name)
-            elif hasattr(database, "set_setting"):
-                database.set_setting("user_name", name)
-                database.set_setting("username", name)
-        except Exception:  # noqa: S110
-            pass
+        _get_settings_controller(self).persist_user_name(name)
 
     # Aliases for alternative naming.
     _start_new_chat = _on_new_chat_clicked
@@ -571,6 +356,43 @@ class LunaGUI(QMainWindow):
             # still land in the same chat area.
             if child is not self.msg_layout:
                 child.setParent(None)
+
+    def _handle_chat_response(self, response) -> None:
+        """Render a successful agent response and preserve TTS/API behavior."""
+        text = str(response).strip().lower()
+        if text == "api is not connected" or text.startswith("error:"):
+            try:
+                self.chat_view.set_api_connected(False)
+            except Exception:
+                pass
+        else:
+            try:
+                self.chat_view.set_api_connected(True)
+            except Exception:
+                pass
+        _display_agent_message(response, self.msg_layout)
+        if getattr(self.chat_view, "voice_output_enabled", False):
+            self._speak(response)
+
+    def _handle_chat_error(self, exc: Exception) -> None:
+        """Render an agent failure without blocking subsequent queue items."""
+        name = type(exc).__name__
+        text = str(exc).lower()
+        if (
+            "could not be reached" in text
+            or "connection" in name.lower()
+            or "providerconnection" in name.lower()
+        ):
+            response = "api is not connected"
+            try:
+                self.chat_view.set_api_connected(False)
+            except Exception:
+                pass
+        else:
+            response = "An internal error occurred while processing your message."
+        _display_agent_message(response, self.msg_layout)
+        if getattr(self.chat_view, "voice_output_enabled", False):
+            self._speak(response)
 
     def _process_agent_response(self, message: str) -> None:
         """Process the agent's response and display it in the conversation."""
@@ -781,6 +603,29 @@ class LunaGUI(QMainWindow):
         self._apply_view_visibility()
         self._refresh_navigation_buttons()
 
+    # ------------------------------------------------------------------
+    # TTS delegation - TTS playback logic lives in TTSController. These
+    # delegates preserve the existing call signatures so any internal or
+    # external callers keep working unchanged.
+    # ------------------------------------------------------------------
+
+    def _on_speaker_toggled(self, checked: bool) -> None:
+        """Handle speaker toggle: stop playback when turned OFF."""
+        self.tts_controller.on_speaker_toggled(checked)
+
+    def _stop_tts(self) -> None:
+        """Stop current playback and prevent pending speech from starting."""
+        self.tts_controller.stop()
+
+    def _speak(self, text: str) -> None:
+        """Synthesize *text* in a background thread and play it aloud."""
+        self.tts_controller.speak(text)
+
+    @Slot(bytes)
+    def _play_wav(self, wav_bytes: bytes) -> None:
+        """Play WAV audio bytes on the GUI thread (queued from worker)."""
+        self.tts_controller._play_wav(wav_bytes)
+
 
 def _display_user_message(text: str, msg_layout: QVBoxLayout, username: str | None = None) -> None:
     """Display a user message in the conversation area."""
@@ -825,3 +670,14 @@ def _display_agent_message(text: str, msg_layout: QVBoxLayout) -> None:
     msg_label.setStyleSheet(msg_style)
 
     msg_layout.addWidget(msg_label)
+
+def _get_settings_controller(gui):
+    """Return a settings controller, creating one when needed."""
+    controller = getattr(gui, "settings_controller", None)
+    if controller is None:
+        controller = SettingsController()
+        try:
+            gui.settings_controller = controller
+        except Exception:
+            pass
+    return controller
